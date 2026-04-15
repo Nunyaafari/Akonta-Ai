@@ -93,6 +93,7 @@ export const computeBudgetStatus = (
 ): BudgetStatus => {
   const used = transactions
     .filter((tx) => tx.type === budget.targetType)
+    .filter((tx) => tx.status === 'confirmed' && tx.correctionOfId === null)
     .reduce((sum, tx) => sum + tx.amount, 0);
 
   const remaining = budget.amount - used;

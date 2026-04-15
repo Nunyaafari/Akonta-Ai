@@ -21,6 +21,8 @@ const summaryRoutes: FastifyPluginAsync = async (fastify) => {
     const transactions = await db.transaction.findMany({
       where: {
         userId: query.userId,
+        status: 'confirmed',
+        correctionOfId: null,
         date: {
           gte: periodStart,
           lte: periodEnd
@@ -62,6 +64,8 @@ const summaryRoutes: FastifyPluginAsync = async (fastify) => {
     const transactions = await db.transaction.findMany({
       where: {
         userId: query.userId,
+        status: 'confirmed',
+        correctionOfId: null,
         date: {
           gte: periodStart,
           lte: periodEnd
@@ -145,6 +149,8 @@ const summaryRoutes: FastifyPluginAsync = async (fastify) => {
     const transactions = await db.transaction.findMany({
       where: {
         userId: body.userId,
+        status: 'confirmed',
+        correctionOfId: null,
         date: {
           gte: periodStart,
           lte: periodEnd

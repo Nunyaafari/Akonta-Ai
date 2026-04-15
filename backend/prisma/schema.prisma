@@ -12,6 +12,26 @@ enum TransactionType {
   expense
 }
 
+enum TransactionEventType {
+  cash_sale
+  momo_sale
+  credit_sale
+  debtor_recovery
+  stock_purchase
+  operating_expense
+  owner_withdrawal
+  loan_received
+  loan_repayment
+  supplier_credit
+  capital_introduced
+  other
+}
+
+enum TransactionStatus {
+  draft
+  confirmed
+}
+
 enum SubscriptionStatus {
   free
   premium
@@ -21,6 +41,22 @@ enum SubscriptionStatus {
 enum PeriodType {
   weekly
   monthly
+}
+
+enum ConversationChannel {
+  web
+  whatsapp
+}
+
+enum CustomLineItemKind {
+  inflow
+  expense
+}
+
+enum WebhookProvider {
+  twilio
+  infobip
+  generic
 }
 
 model User {
@@ -38,19 +74,29 @@ model User {
   transactions       Transaction[]
   summaries          Summary[]
   budgets            Budget[]
+  conversationSessions ConversationSession[]
+  processedWebhookEvents ProcessedWebhookEvent[]
+  customLineItems    CustomLineItem[]
 }
 
 model Transaction {
-  id         String          @id @default(cuid())
-  user       User            @relation(fields: [userId], references: [id])
-  userId     String
-  type       TransactionType
-  amount     Float
-  date       DateTime
-  category   String?
-  notes      String?
-  createdAt  DateTime        @default(now())
-  updatedAt  DateTime        @updatedAt
+  id               String               @id @default(cuid())
+  user             User                 @relation(fields: [userId], references: [id])
+  userId           String
+  type             TransactionType
+  eventType        TransactionEventType @default(other)
+  status           TransactionStatus    @default(confirmed)
+  amount           Float
+  date             DateTime
+  category         String?
+  notes            String?
+  correctionReason String?
+  correctionOfId   String?
+  correctionOf     Transaction?         @relation("TransactionCorrections", fields: [correctionOfId], references: [id])
+  corrections      Transaction[]        @relation("TransactionCorrections")
+  confirmedAt      DateTime?
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
 }
 
 model Summary {
@@ -87,4 +133,45 @@ model Budget {
   notes       String?
   createdAt   DateTime         @default(now())
   updatedAt   DateTime         @updatedAt
+}
+
+model ConversationSession {
+  id        String              @id @default(cuid())
+  user      User                @relation(fields: [userId], references: [id])
+  userId    String
+  channel   ConversationChannel @default(web)
+  step      String              @default("idle")
+  context   Json?
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+
+  @@unique([userId, channel])
+}
+
+model CustomLineItem {
+  id              String             @id @default(cuid())
+  user            User               @relation(fields: [userId], references: [id])
+  userId          String
+  kind            CustomLineItemKind
+  label           String
+  normalizedLabel String
+  usageCount      Int                @default(1)
+  lastUsedAt      DateTime           @default(now())
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  @@unique([userId, kind, normalizedLabel])
+  @@index([userId, kind])
+}
+
+model ProcessedWebhookEvent {
+  id        String          @id @default(cuid())
+  provider  WebhookProvider
+  eventId   String
+  user      User?           @relation(fields: [userId], references: [id])
+  userId    String?
+  payload   Json?
+  createdAt DateTime        @default(now())
+
+  @@unique([provider, eventId])
 }

@@ -15,12 +15,30 @@ export interface Transaction {
   id: string;
   userId: string;
   type: 'revenue' | 'expense';
+  eventType?:
+    | 'cash_sale'
+    | 'momo_sale'
+    | 'credit_sale'
+    | 'debtor_recovery'
+    | 'stock_purchase'
+    | 'operating_expense'
+    | 'owner_withdrawal'
+    | 'loan_received'
+    | 'loan_repayment'
+    | 'supplier_credit'
+    | 'capital_introduced'
+    | 'other';
+  status?: 'draft' | 'confirmed';
   amount: number;
   date: Date;
   notes?: string;
   category?: string;
+  correctionReason?: string;
+  correctionOfId?: string | null;
+  confirmedAt?: Date | string | null;
   attachmentName?: string;
   createdAt: Date;
+  updatedAt?: Date | string;
 }
 
 export interface ChatMessage {
@@ -95,6 +113,60 @@ export interface BudgetStatus {
   remaining: number;
   percentUsed: number;
   status: 'onTrack' | 'nearTarget' | 'overBudget';
+}
+
+export interface MonthlyInsights {
+  period: {
+    year: number;
+    month: number;
+    periodStart: string;
+    periodEnd: string;
+    daysElapsed: number;
+    daysInMonth: number;
+  };
+  targetStatus: {
+    revenueTarget?: number;
+    expenseTarget?: number;
+    profitTarget?: number;
+    actualRevenue: number;
+    actualExpenses: number;
+    actualProfit: number;
+    expectedRevenueToDate?: number;
+    expectedExpensesToDate?: number;
+    revenueGapToDate?: number;
+    expenseVarianceToDate?: number;
+    profitGap?: number;
+    revenueStatus?: 'ahead' | 'behind' | 'onTrack';
+    expenseStatus?: 'over' | 'within' | 'onTrack';
+    profitStatus?: 'above' | 'below' | 'onTrack';
+  };
+  expenseOverrun: {
+    isOverrun: boolean;
+    expectedByNow?: number;
+    actualByNow: number;
+    varianceByNow?: number;
+    overrunCategories: Array<{
+      category: string;
+      target: number;
+      actual: number;
+      variance: number;
+    }>;
+    topExpenseCategories: Array<{
+      category: string;
+      amount: number;
+    }>;
+  };
+  creditReadiness: {
+    score: number;
+    level: 'poor' | 'fair' | 'good' | 'strong';
+    consistencyRatio: number;
+    classificationRatio: number;
+    personalSeparationRatio: number;
+    creditTrackingRatio: number;
+    daysWithRecords: number;
+    expectedRecordDays: number;
+  };
+  highlights: string[];
 }
 
 export type WhatsAppProvider = 'twilio' | 'infobip';

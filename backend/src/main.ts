@@ -1,4 +1,6 @@
 import Fastify from 'fastify';
+import crypto from 'node:crypto';
+import { parse as parseQuerystring } from 'node:querystring';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import { config } from './lib/env.js';
@@ -6,20 +8,71 @@ import userRoutes from './routes/users.js';
 import transactionRoutes from './routes/transactions.js';
 import summaryRoutes from './routes/summaries.js';
 import budgetRoutes from './routes/budgets.js';
+import insightRoutes from './routes/insights.js';
 import whatsappRoutes from './routes/whatsapp.js';
 import chatRoutes from './routes/chat.js';
 
 const app = Fastify({ logger: true });
+
+const secureEqual = (a: string, b: string): boolean => {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  if (left.length !== right.length) return false;
+  return crypto.timingSafeEqual(left, right);
+};
+
+const resolveApiKeyFromRequest = (authorizationHeader: unknown, apiKeyHeader: unknown): string | null => {
+  const direct = typeof apiKeyHeader === 'string' ? apiKeyHeader : null;
+  if (direct && direct.trim().length > 0) return direct.trim();
+
+  if (typeof authorizationHeader !== 'string') return null;
+  const token = authorizationHeader.trim();
+  if (!token) return null;
+  if (token.toLowerCase().startsWith('bearer ')) {
+    return token.slice(7).trim();
+  }
+  return token;
+};
+
+app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_request, body, done) => {
+  try {
+    const payload = typeof body === 'string' ? body : body.toString('utf-8');
+    done(null, parseQuerystring(payload));
+  } catch (error) {
+    done(error as Error);
+  }
+});
 
 await app.register(cors, {
   origin: [config.APP_ORIGIN],
 });
 
 await app.register(helmet);
+
+app.addHook('onRequest', async (request, reply) => {
+  if (!config.BACKEND_API_KEY) return;
+  if (request.method === 'OPTIONS') return;
+
+  const path = request.url.split('?')[0];
+  const publicPaths = new Set([
+    '/api/health',
+    '/api/whatsapp/webhook/twilio',
+    '/api/whatsapp/webhook/infobip'
+  ]);
+
+  if (publicPaths.has(path)) return;
+
+  const providedKey = resolveApiKeyFromRequest(request.headers.authorization, request.headers['x-akonta-api-key']);
+  if (!providedKey || !secureEqual(config.BACKEND_API_KEY, providedKey)) {
+    return reply.status(401).send({ message: 'Unauthorized: invalid API key.' });
+  }
+});
+
 await app.register(userRoutes, { prefix: '/api/users' });
 await app.register(transactionRoutes, { prefix: '/api/transactions' });
 await app.register(summaryRoutes, { prefix: '/api/summaries' });
 await app.register(budgetRoutes, { prefix: '/api/budgets' });
+await app.register(insightRoutes, { prefix: '/api/insights' });
 await app.register(whatsappRoutes, { prefix: '/api/whatsapp' });
 await app.register(chatRoutes, { prefix: '/api/chat' });
 

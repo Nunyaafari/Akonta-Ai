@@ -1,0 +1,90 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TransactionType {
+  revenue
+  expense
+}
+
+enum SubscriptionStatus {
+  free
+  premium
+  trial
+}
+
+enum PeriodType {
+  weekly
+  monthly
+}
+
+model User {
+  id                 String             @id @default(cuid())
+  name               String
+  phoneNumber        String             @unique
+  businessName       String?
+  businessType       String?
+  preferredTime      String?
+  timezone           String?
+  subscriptionStatus SubscriptionStatus @default(free)
+  trialEndsAt        DateTime?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  transactions       Transaction[]
+  summaries          Summary[]
+  budgets            Budget[]
+}
+
+model Transaction {
+  id         String          @id @default(cuid())
+  user       User            @relation(fields: [userId], references: [id])
+  userId     String
+  type       TransactionType
+  amount     Float
+  date       DateTime
+  category   String?
+  notes      String?
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+}
+
+model Summary {
+  id               String      @id @default(cuid())
+  user             User        @relation(fields: [userId], references: [id])
+  userId           String
+  periodType       PeriodType
+  periodStart      DateTime
+  periodEnd        DateTime
+  totalRevenue     Float
+  totalExpenses    Float
+  profit           Float
+  transactionCount Int
+  details          Json?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+}
+
+enum BudgetTargetType {
+  expense
+  revenue
+}
+
+model Budget {
+  id          String           @id @default(cuid())
+  user        User             @relation(fields: [userId], references: [id])
+  userId      String
+  periodType  PeriodType
+  periodStart DateTime
+  periodEnd   DateTime
+  targetType  BudgetTargetType
+  amount      Float
+  category    String?
+  notes       String?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+}

@@ -11,6 +11,7 @@ import budgetRoutes from './routes/budgets.js';
 import insightRoutes from './routes/insights.js';
 import whatsappRoutes from './routes/whatsapp.js';
 import chatRoutes from './routes/chat.js';
+import adminRoutes from './routes/admin.js';
 
 const app = Fastify({ logger: true });
 
@@ -50,10 +51,23 @@ await app.register(cors, {
 await app.register(helmet);
 
 app.addHook('onRequest', async (request, reply) => {
-  if (!config.BACKEND_API_KEY) return;
+  const path = request.url.split('?')[0];
   if (request.method === 'OPTIONS') return;
 
-  const path = request.url.split('?')[0];
+  let hasAdminAccess = false;
+  if (path.startsWith('/api/admin') && config.ADMIN_API_KEY) {
+    const providedAdminKey = resolveApiKeyFromRequest(
+      request.headers.authorization,
+      request.headers['x-akonta-admin-key']
+    );
+    if (!providedAdminKey || !secureEqual(config.ADMIN_API_KEY, providedAdminKey)) {
+      return reply.status(401).send({ message: 'Unauthorized: invalid admin API key.' });
+    }
+    hasAdminAccess = true;
+  }
+
+  if (!config.BACKEND_API_KEY || hasAdminAccess) return;
+
   const publicPaths = new Set([
     '/api/health',
     '/api/whatsapp/webhook/twilio',
@@ -75,6 +89,7 @@ await app.register(budgetRoutes, { prefix: '/api/budgets' });
 await app.register(insightRoutes, { prefix: '/api/insights' });
 await app.register(whatsappRoutes, { prefix: '/api/whatsapp' });
 await app.register(chatRoutes, { prefix: '/api/chat' });
+await app.register(adminRoutes, { prefix: '/api/admin' });
 
 app.get('/api/health', async () => ({ status: 'ok' }));
 

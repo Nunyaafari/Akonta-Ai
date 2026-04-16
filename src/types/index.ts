@@ -6,8 +6,14 @@ export interface User {
   businessType: string;
   preferredTime: 'morning' | 'afternoon' | 'evening';
   timezone: string;
+  currencyCode?: string;
   subscriptionStatus: 'free' | 'premium' | 'trial';
   trialEndsAt?: Date;
+  subscriptionEndsAt?: Date | string | null;
+  freeSubscriptionMonthsEarned?: number;
+  referralCode?: string | null;
+  referredByUserId?: string | null;
+  isSuperAdmin?: boolean;
   createdAt: Date;
 }
 
@@ -171,6 +177,58 @@ export interface MonthlyInsights {
 
 export type WhatsAppProvider = 'twilio' | 'infobip';
 
+export interface ReferralProgress {
+  referralCode: string;
+  referralLink: string;
+  qualifiedReferrals: number;
+  rewardMilestoneSize: number;
+  remainingForNextReward: number;
+  totalRewardMonths: number;
+  rewards: Array<{
+    id: string;
+    milestone: number;
+    grantedMonths: number;
+    qualifiedReferralsAtGrant: number;
+    createdAt: string | Date;
+  }>;
+  recentConversions: Array<{
+    id: string;
+    qualifiedAt: string | Date;
+    referredUser: {
+      id: string;
+      name: string;
+      businessName: string | null;
+      subscriptionStatus: 'free' | 'premium' | 'trial';
+    };
+  }>;
+}
+
+export interface AdminAnalytics {
+  users: {
+    total: number;
+    subscribed: number;
+    paid: number;
+    trial: number;
+    free: number;
+  };
+  subscriptions: {
+    paidStarts: number;
+  };
+  referrals: {
+    qualifiedConversions: number;
+    rewardsGranted: number;
+    freeMonthsGranted: number;
+  };
+  businessTypes: Array<{
+    type: string;
+    count: number;
+  }>;
+  whatsapp: {
+    provider: WhatsAppProvider;
+    availableProviders: WhatsAppProvider[];
+  };
+}
+
 export interface PremiumInsight {
   id: string;
   type: 'warning' | 'recommendation' | 'insight';
@@ -179,4 +237,4 @@ export interface PremiumInsight {
   icon: string;
 }
 
-export type AppView = 'landing' | 'onboarding' | 'chat' | 'attach' | 'dashboard' | 'reports' | 'history' | 'premium' | 'settings';
+export type AppView = 'landing' | 'onboarding' | 'chat' | 'attach' | 'dashboard' | 'reports' | 'history' | 'settings' | 'admin';

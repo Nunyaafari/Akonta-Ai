@@ -29,6 +29,9 @@ This backend service provides bookkeeping, transaction recording, summary report
 - `POST /api/users` - create a user
 - `GET /api/users/:id` - fetch a user
 - `GET /api/users` - list users
+- `PATCH /api/users/:id` - update profile preferences (including `currencyCode`)
+- `POST /api/users/:id/subscription` - record subscription status changes
+- `GET /api/users/:id/referrals` - referral progress and reward history
 - `POST /api/transactions` - create a transaction (`status` can be `draft` or `confirmed`)
 - `GET /api/transactions?userId=...&start=...&end=...` - list transactions (`status`, `eventType`, `includeCorrections=true` supported)
 - `PATCH /api/transactions/:id` - update a draft transaction
@@ -46,6 +49,9 @@ This backend service provides bookkeeping, transaction recording, summary report
 - `GET /api/whatsapp/providers` - list available WhatsApp providers and the selected default
 - `GET /api/whatsapp/webhook/events?provider=...&limit=...` - inspect deduplicated webhook events
 - `POST /api/chat` - process a stateful accounting conversation turn (`channel: web|whatsapp`)
+- `GET /api/admin/analytics` - super admin analytics (users, subscriptions, business type mix, referral rewards)
+- `GET /api/admin/settings/whatsapp-provider` - get global WhatsApp provider setting
+- `PATCH /api/admin/settings/whatsapp-provider` - update global WhatsApp provider setting
 
 ## Notes
 
@@ -59,6 +65,8 @@ This backend service provides bookkeeping, transaction recording, summary report
 - Daily flow is draft-first: entries stay in `draft` status until the user explicitly replies `SAVE`.
 - API key auth can be enforced globally using `BACKEND_API_KEY` (`x-akonta-api-key` or `Authorization: Bearer ...`).
 - Webhook ingestion is idempotent using `ProcessedWebhookEvent` records keyed by provider + event ID.
+- Super admin routes can be protected with `ADMIN_API_KEY` (`x-akonta-admin-key` or `Authorization: Bearer ...`).
+- Referral rewards are milestone-based: every 5 qualified paid referrals grants 3 free premium months.
 
 ## Security configuration
 

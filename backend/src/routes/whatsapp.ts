@@ -3,7 +3,7 @@ import { Prisma } from '@prisma/client';
 import crypto from 'node:crypto';
 import db from '../lib/db.js';
 import { processConversationMessage } from '../services/conversation.js';
-import { availableProviders, resolveProvider, sendWhatsAppMessage } from '../services/whatsapp.js';
+import { availableProviders, getConfiguredProvider, resolveProvider, sendWhatsAppMessage } from '../services/whatsapp.js';
 import {
   normalizePhoneDigits,
   parseInfobipWebhook,
@@ -289,18 +289,22 @@ const whatsappRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     try {
-      const result = await sendWhatsAppMessage(body.to, body.message, body.provider);
-      return { success: true, provider: resolveProvider(body.provider), result };
+      const selectedProvider = body.provider ? resolveProvider(body.provider) : await getConfiguredProvider();
+      const result = await sendWhatsAppMessage(body.to, body.message, selectedProvider);
+      return { success: true, provider: selectedProvider, result };
     } catch (error) {
       fastify.log.error(error);
       return reply.status(500).send({ message: (error as Error).message });
     }
   });
 
-  fastify.get('/providers', async () => ({
-    default: resolveProvider(),
-    available: availableProviders
-  }));
+  fastify.get('/providers', async () => {
+    const configured = await getConfiguredProvider();
+    return {
+      default: configured,
+      available: availableProviders
+    };
+  });
 };
 
 export default whatsappRoutes;

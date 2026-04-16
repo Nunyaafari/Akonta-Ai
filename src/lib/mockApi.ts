@@ -1,5 +1,18 @@
-import type { Budget, BudgetStatus, BudgetTargetType, SummaryPayload, Transaction, User, WhatsAppProvider } from '../types';
+import type {
+  AdminAnalytics,
+  Budget,
+  BudgetStatus,
+  BudgetTargetType,
+  ReferralProgress,
+  SummaryPayload,
+  Transaction,
+  User,
+  WhatsAppProvider
+} from '../types';
 import { currentWeekSummary, currentMonthSummary, mockTransactions } from '../data/mockData';
+
+const REFERRAL_MILESTONE_SIZE = 5;
+const REFERRAL_REWARD_MONTHS = 3;
 
 const parseMessageToTransactions = (userId: string, message: string): Transaction[] => {
   const text = message.toLowerCase().trim();
@@ -46,7 +59,9 @@ const parseMessageToTransactions = (userId: string, message: string): Transactio
   if (parsed.length === 0) {
     if (text.match(/\d+/)) {
       const amount = Number(text.match(/\d+(?:[.,]\d+)?/)?.[0]?.replace(',', '.') ?? 0);
-      if (text.includes('spent') || text.includes('paid') || text.includes('cost') || text.includes('expense')) {
+      const hasExpenseHint = /(spent|paid|cost|expense|transport|rent|utility|airtime|data|salary|fuel|stock|inventory|owner|withdraw|purchase|bought|buy)/i.test(text);
+      const hasRevenueHint = /(made|sold|earned|received|income|revenue|inflow|sale|momo|capital|loan received|debtor|recovery)/i.test(text);
+      if (hasExpenseHint && !hasRevenueHint) {
         parsed.push({
           id: `tx-${Date.now()}-${Math.random().toString(36).slice(2)}`,
           userId,
@@ -130,6 +145,15 @@ const createSummary = (transactions: Transaction[]): SummaryPayload => {
 const users: User[] = [];
 const transactionsByUser: Record<string, Transaction[]> = {};
 const budgetsByUser: Record<string, Budget[]> = {};
+const userByReferralCode: Record<string, string> = {};
+const referralConversionsByReferrer: Record<
+  string,
+  Array<{ id: string; referredUserId: string; qualifiedAt: string }>
+> = {};
+const referralRewardsByReferrer: Record<
+  string,
+  Array<{ id: string; milestone: number; grantedMonths: number; qualifiedReferralsAtGrant: number; createdAt: string }>
+> = {};
 const conversationSessionsByUser: Record<
   string,
   {
@@ -178,6 +202,7 @@ const defaultProviderInfo = {
   default: 'twilio' as WhatsAppProvider,
   available: ['twilio', 'infobip'] as WhatsAppProvider[]
 };
+let activeProvider = defaultProviderInfo.default;
 
 const normalizeMonthStart = (date: Date): string => {
   const utc = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
@@ -185,6 +210,15 @@ const normalizeMonthStart = (date: Date): string => {
 };
 
 const createTransactionId = () => `tx-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+const createReferralCode = (seed?: string) => {
+  const prefix = (seed ?? 'AKONTA').replace(/[^a-z0-9]/gi, '').toUpperCase().slice(0, 6) || 'AKONTA';
+  return `${prefix}${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+};
+const addMonthsUtc = (value: Date, months: number): Date => {
+  const next = new Date(value);
+  next.setUTCMonth(next.getUTCMonth() + months);
+  return next;
+};
 
 const parseDateInput = (value?: string): Date => {
   if (!value) return new Date();
@@ -192,9 +226,60 @@ const parseDateInput = (value?: string): Date => {
   return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
 };
 
+const ensureReferralQualification = (userId: string) => {
+  const user = users.find((entry) => entry.id === userId);
+  if (!user || user.subscriptionStatus !== 'premium' || !user.referredByUserId) return;
+
+  const referrerId = user.referredByUserId;
+  const existing = referralConversionsByReferrer[referrerId] ?? [];
+  if (!existing.some((item) => item.referredUserId === userId)) {
+    existing.push({
+      id: `ref-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      referredUserId: userId,
+      qualifiedAt: new Date().toISOString()
+    });
+    referralConversionsByReferrer[referrerId] = existing;
+  }
+
+  const rewards = referralRewardsByReferrer[referrerId] ?? [];
+  const milestoneEarned = Math.floor(existing.length / REFERRAL_MILESTONE_SIZE);
+  while (rewards.length < milestoneEarned) {
+    const milestone = rewards.length + 1;
+    rewards.push({
+      id: `rwd-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      milestone,
+      grantedMonths: REFERRAL_REWARD_MONTHS,
+      qualifiedReferralsAtGrant: milestone * REFERRAL_MILESTONE_SIZE,
+      createdAt: new Date().toISOString()
+    });
+
+    const referrer = users.find((entry) => entry.id === referrerId);
+    if (referrer) {
+      const now = new Date();
+      const baseEnd = referrer.subscriptionEndsAt
+        ? new Date(referrer.subscriptionEndsAt)
+        : now;
+      const anchor = baseEnd > now ? baseEnd : now;
+      referrer.subscriptionStatus = 'premium';
+      referrer.subscriptionEndsAt = addMonthsUtc(anchor, REFERRAL_REWARD_MONTHS);
+      referrer.freeSubscriptionMonthsEarned = (referrer.freeSubscriptionMonthsEarned ?? 0) + REFERRAL_REWARD_MONTHS;
+    }
+  }
+  referralRewardsByReferrer[referrerId] = rewards;
+};
+
 export const mockCreateUser = async (body: Partial<User>): Promise<User> => {
   const id = `demo-${Date.now()}`;
   const createdAt = new Date();
+  const normalizedReferral = body.referralCode?.replace(/[^a-z0-9]/gi, '').toUpperCase();
+  const referredByUserId = normalizedReferral ? userByReferralCode[normalizedReferral] ?? null : null;
+  let referralCode = createReferralCode(body.name);
+  while (userByReferralCode[referralCode]) {
+    referralCode = createReferralCode(body.name);
+  }
+
+  const trialEndsAt = new Date(createdAt);
+  trialEndsAt.setUTCDate(trialEndsAt.getUTCDate() + 7);
   const user: User = {
     id,
     name: body.name ?? 'Demo User',
@@ -203,15 +288,68 @@ export const mockCreateUser = async (body: Partial<User>): Promise<User> => {
     businessType: body.businessType ?? 'Trading / Retail',
     preferredTime: body.preferredTime ?? 'evening',
     timezone: body.timezone ?? 'Africa/Accra',
+    currencyCode: body.currencyCode ?? 'GHS',
     subscriptionStatus: body.subscriptionStatus ?? 'trial',
-    trialEndsAt: undefined,
+    trialEndsAt: body.subscriptionStatus === 'trial' || !body.subscriptionStatus ? trialEndsAt : undefined,
+    subscriptionEndsAt: body.subscriptionEndsAt ?? null,
+    freeSubscriptionMonthsEarned: body.freeSubscriptionMonthsEarned ?? 0,
+    referralCode,
+    referredByUserId,
+    isSuperAdmin: body.isSuperAdmin ?? users.length === 0,
     createdAt,
   };
   users.push(user);
+  userByReferralCode[referralCode] = id;
   transactionsByUser[id] = [...mockTransactions.map((tx) => ({ ...tx, id: `${tx.id}-${id}`, userId: id }))];
   budgetsByUser[id] = [];
   conversationSessionsByUser[id] = { step: 'idle' };
   customLineItemsByUser[id] = { inflow: [], expense: [] };
+  ensureReferralQualification(id);
+  return user;
+};
+
+export const mockGetUser = async (id: string): Promise<User | undefined> => users.find((user) => user.id === id);
+
+export const mockListUsers = async (): Promise<User[]> => [...users];
+
+export const mockUpdateUser = async (
+  id: string,
+  updates: Partial<Pick<User, 'name' | 'businessName' | 'businessType' | 'preferredTime' | 'timezone' | 'currencyCode'>>
+): Promise<User> => {
+  const user = users.find((entry) => entry.id === id);
+  if (!user) throw new Error('User not found');
+  Object.assign(user, updates);
+  return user;
+};
+
+export const mockActivateUserSubscription = async (id: string, payload: {
+  status?: 'free' | 'premium' | 'trial';
+  months?: number;
+  note?: string;
+}): Promise<User> => {
+  const user = users.find((entry) => entry.id === id);
+  if (!user) throw new Error('User not found');
+
+  const nextStatus = payload.status ?? user.subscriptionStatus;
+  user.subscriptionStatus = nextStatus;
+  if (nextStatus === 'premium') {
+    const now = new Date();
+    const anchorBase = user.subscriptionEndsAt ? new Date(user.subscriptionEndsAt) : now;
+    const anchor = anchorBase > now ? anchorBase : now;
+    const months = Math.max(0, Math.floor(payload.months ?? 1));
+    user.subscriptionEndsAt = months > 0 ? addMonthsUtc(anchor, months) : user.subscriptionEndsAt;
+    user.trialEndsAt = undefined;
+    ensureReferralQualification(id);
+  } else if (nextStatus === 'trial') {
+    const trialEnd = new Date();
+    trialEnd.setUTCDate(trialEnd.getUTCDate() + 7);
+    user.trialEndsAt = trialEnd;
+    user.subscriptionEndsAt = trialEnd;
+  } else {
+    user.trialEndsAt = undefined;
+    user.subscriptionEndsAt = null;
+  }
+
   return user;
 };
 
@@ -687,7 +825,7 @@ const buildSalesTypePrompt = (prefix?: string, customItems: string[] = []): stri
     ...baseSalesTypeOptions.map((option, index) => `${index + 1}. ${option.label}`),
     ...customItems.map((label, index) => `${baseSalesTypeOptions.length + index + 1}. ${label}`)
   ];
-  return `${header}What type of money inflow was this?\n${lines.join('\n')}\nReply with 1-${lines.length} (or type the name).`;
+  return `${header}What type of money inflow was this?\n${lines.join('\n')}\nReply with 1-${lines.length} (or type the name). You can also reply BACK (0) or CANCEL (99).`;
 };
 
 const buildExpenseTypePrompt = (prefix?: string, customItems: string[] = []): string => {
@@ -696,16 +834,19 @@ const buildExpenseTypePrompt = (prefix?: string, customItems: string[] = []): st
     ...baseExpenseTypeOptions.map((option, index) => `${index + 1}. ${option.label}`),
     ...customItems.map((label, index) => `${baseExpenseTypeOptions.length + index + 1}. ${label}`)
   ];
-  return `${header}What type of expense was it?\n${lines.join('\n')}\nReply with 1-${lines.length} (or type the name).`;
+  return `${header}What type of expense was it?\n${lines.join('\n')}\nReply with 1-${lines.length} (or type the name). You can also reply BACK (0) or CANCEL (99).`;
 };
 
 const buildCustomTypeConfirmPrompt = (
   label: string,
   kind: 'inflow' | 'expense'
-): string => `“${label}” is not in the ${kind} type list. Add it as a new ${kind} line item? Reply YES or NO.`;
+): string => `“${label}” is not in the ${kind} type list. Add it as a new ${kind} line item? Reply YES or NO. (0 = BACK, 99 = CANCEL)`;
 
 const parseYesResponse = (text: string): boolean => /^(yes|y|ok|okay|confirm|add)$/i.test(text.trim());
-const parseNoResponse = (text: string): boolean => /^(no|n|cancel|back)$/i.test(text.trim());
+const parseNoResponse = (text: string): boolean => /^(no|n)$/i.test(text.trim());
+const parseBack = (text: string): boolean => /^(0|back|previous|prev|menu)$/i.test(text.trim());
+const parseCancel = (text: string): boolean => /^(99|cancel|stop|quit|end)$/i.test(text.trim());
+const parseNoValue = (text: string): boolean => /^(no|none|zero|nil|nothing|skip)$/i.test(text.trim());
 const isBackfillYes = (text: string): boolean => parseYesResponse(text) || /^1$/.test(text.trim());
 const isBackfillNo = (text: string): boolean => parseNoResponse(text) || /^2$/.test(text.trim());
 
@@ -989,6 +1130,94 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
 
   let botReply = '';
 
+  if (session.step !== 'idle' && parseCancel(trimmed)) {
+    session.step = 'idle';
+    session.salesDraftId = undefined;
+    session.expenseDraftId = undefined;
+    session.logDateKey = undefined;
+    session.pendingBackfillDateKey = undefined;
+    session.pendingSalesTypeLabel = undefined;
+    session.pendingExpenseTypeLabel = undefined;
+    return {
+      botReply: 'No problem. I have cancelled this draft. Send a message when you are ready to log again.',
+      conversation: {
+        step: session.step,
+        awaitingConfirmation: false
+      },
+      transactions: touched,
+      summary: createSummary(touched),
+      monthlySummary: createSummary((transactionsByUser[userId] ?? []).filter((tx) => tx.status === 'confirmed' && !tx.correctionOfId)),
+      budgetStatuses: []
+    };
+  }
+
+  if (session.step !== 'idle' && parseBack(trimmed)) {
+    if (session.step === 'ask_backfill_consent') {
+      session.pendingBackfillDateKey = undefined;
+      session.logDateKey = undefined;
+      session.step = 'idle';
+      botReply = 'Okay. Back to start. Send a message when you are ready to log today.';
+    } else if (session.step === 'ask_sales_type' || session.step === 'confirm_sales_type_custom') {
+      session.pendingSalesTypeLabel = undefined;
+      session.salesTypeConfirmed = false;
+      session.step = 'ask_sales';
+      botReply = `Back to inflow amount. ${buildInflowQuestionForLogDate(session.logDateKey)} (Reply NO if there was no inflow.)`;
+    } else if (session.step === 'ask_expense_type' || session.step === 'confirm_expense_type_custom' || session.step === 'ask_expense_category') {
+      session.pendingExpenseTypeLabel = undefined;
+      session.expenseTypeConfirmed = false;
+      session.step = 'ask_expense';
+      botReply = `Back to expense amount. ${buildExpenseQuestionForLogDate(session.logDateKey)}`;
+    } else if (session.step === 'await_confirm') {
+      session.pendingSalesTypeLabel = undefined;
+      session.pendingExpenseTypeLabel = undefined;
+      session.salesTypeConfirmed = false;
+      session.expenseTypeConfirmed = false;
+      session.step = 'ask_sales';
+      botReply = `Back to edit mode. ${buildInflowQuestionForLogDate(session.logDateKey)} (Reply NO if there was no inflow.)`;
+    } else {
+      session.step = 'ask_sales';
+      botReply = `${buildInflowQuestionForLogDate(session.logDateKey)} (Reply NO if there was no inflow.)`;
+    }
+  }
+
+  if (botReply && session.step !== 'idle') {
+    const now = new Date();
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const monthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+    monthEnd.setMilliseconds(monthEnd.getMilliseconds() - 1);
+    const monthlyTransactions = (transactionsByUser[userId] ?? []).filter((tx) => {
+      const txDate = new Date(tx.date);
+      return txDate >= monthStart && txDate <= monthEnd && tx.status === 'confirmed' && !tx.correctionOfId;
+    });
+
+    const budgets = budgetsByUser[userId] ?? [];
+    const budgetStatuses: BudgetStatus[] = budgets
+      .filter((budget) => budget.periodStart === monthStart.toISOString())
+      .map((budget) => {
+        const used = monthlyTransactions
+          .filter((tx) => tx.type === budget.targetType)
+          .reduce((sum, tx) => sum + tx.amount, 0);
+        const remaining = budget.amount - used;
+        const percentUsed = budget.amount > 0 ? Math.min(100, (used / budget.amount) * 100) : 0;
+        let status: BudgetStatus['status'] = 'onTrack';
+        if (remaining < 0) status = 'overBudget';
+        else if (percentUsed >= 80) status = 'nearTarget';
+        return { budget, used, remaining, percentUsed, status };
+      });
+
+    return {
+      botReply,
+      conversation: {
+        step: session.step,
+        awaitingConfirmation: session.step === 'await_confirm'
+      },
+      transactions: touched,
+      summary: createSummary(touched),
+      monthlySummary: createSummary(monthlyTransactions),
+      budgetStatuses
+    };
+  }
+
   if (session.step === 'idle') {
     if (!revenueParsed && !expenseParsed) {
       const idleReply = isAcknowledgementMessage(trimmed)
@@ -1052,7 +1281,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
 
       if (!session.salesDraftId) {
         session.step = 'ask_sales';
-        botReply = `I noted the expense draft. ${buildInflowQuestionForLogDate(session.logDateKey)}`;
+        botReply = `I noted the expense draft. ${buildInflowQuestionForLogDate(session.logDateKey)} Reply NO if there was no inflow.`;
       } else if (!session.salesTypeConfirmed) {
         session.step = 'ask_sales_type';
         botReply = buildSalesTypePrompt('Noted.', customInflowItems);
@@ -1077,7 +1306,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
             expenseAmount: expenseDraft?.amount ?? 0,
             expenseEventType: session.expenseEventType,
             expenseCategory: expenseDraft?.category ?? session.expenseCategory
-          })}\n\nReply SAVE to confirm or EDIT to adjust.`;
+          })}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`;
         }
       }
     }
@@ -1100,29 +1329,100 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
       botReply = `${buildBackfillConsentPrompt(backfillDateKey)} Reply with 1 or 2.`;
     }
   } else if (session.step === 'ask_sales') {
-    const amount = revenueParsed?.amount ?? parseAmount(trimmed);
-    if (amount === null) {
-      botReply = 'Please send the money inflow amount in cedis so I can save it as draft. Example: "Inflow 850".';
-    } else {
-      const salesEventType = explicitSalesEvent ?? session.salesEventType ?? 'cash_sale';
-      const sales = await upsertDraft({
-        draftId: session.salesDraftId,
-        type: 'revenue',
-        amount,
-        date: logDate,
-        eventType: salesEventType,
-        category: revenueParsed?.category ?? session.salesCategory ?? 'Sales',
-        notes: revenueParsed?.notes
-      });
-      session.salesDraftId = sales.id;
-      session.salesEventType = salesEventType;
-      session.salesCategory = sales.category ?? 'Sales';
-      if (explicitSalesEvent) session.salesTypeConfirmed = true;
+    if (parseNoValue(trimmed)) {
+      session.salesDraftId = undefined;
+      session.salesEventType = undefined;
+      session.salesTypeConfirmed = true;
+      session.salesCategory = undefined;
       session.pendingSalesTypeLabel = undefined;
-      session.step = session.salesTypeConfirmed ? 'ask_expense' : 'ask_sales_type';
-      botReply = session.step === 'ask_sales_type'
-        ? buildSalesTypePrompt(`Recorded draft inflow: GHS ${amount}.`, customInflowItems)
-        : `Recorded draft inflow: GHS ${amount}. ${buildExpenseQuestionForLogDate(session.logDateKey)}`;
+
+      if (!session.expenseDraftId) {
+        session.step = 'ask_expense';
+        botReply = `Inflow recorded as GHS 0. ${buildExpenseQuestionForLogDate(session.logDateKey)}`;
+      } else if (!session.expenseTypeConfirmed) {
+        const expenseDraft = findTransaction(session.expenseDraftId);
+        session.step = 'ask_expense_type';
+        botReply = buildExpenseTypePrompt(`Inflow recorded as GHS 0. Recorded draft expense: GHS ${expenseDraft?.amount ?? 0}.`, customExpenseItems);
+      } else {
+        const expenseDraft = findTransaction(session.expenseDraftId);
+        if (!expenseDraft?.category && (expenseDraft?.amount ?? 0) > 0) {
+          session.step = 'ask_expense_category';
+          botReply = `Inflow recorded as GHS 0. Recorded draft expense: GHS ${expenseDraft?.amount ?? 0}. What was it spent on?`;
+        } else {
+          session.step = 'await_confirm';
+          botReply = `Draft summary:\n${buildDraftSummary({
+            salesAmount: 0,
+            expenseAmount: expenseDraft?.amount,
+            expenseEventType: session.expenseEventType,
+            expenseCategory: expenseDraft?.category ?? session.expenseCategory
+          })}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`;
+        }
+      }
+    } else {
+      const shouldTreatAsExpenseFirst = Boolean(
+        (expenseParsed && !revenueParsed)
+        || (!revenueParsed && explicitExpenseEvent && !explicitSalesEvent)
+      );
+
+      if (shouldTreatAsExpenseFirst) {
+        const expenseAmount = expenseParsed?.amount ?? parseAmount(trimmed);
+        if (expenseAmount === null) {
+          botReply = `If this is an expense, send amount + label (example: "230 transport"). Otherwise, ${buildInflowQuestionForLogDate(session.logDateKey)}`;
+        } else {
+          const expenseEventType = explicitExpenseEvent ?? session.expenseEventType ?? 'operating_expense';
+          const expenseCategory = expenseParsed?.category ?? session.expenseCategory ?? defaultExpenseCategory(expenseEventType);
+          const expense = await upsertDraft({
+            draftId: session.expenseDraftId,
+            type: 'expense',
+            amount: expenseAmount,
+            date: logDate,
+            eventType: expenseEventType,
+            category: expenseCategory,
+            notes: expenseParsed?.notes
+          });
+          session.expenseDraftId = expense.id;
+          session.expenseEventType = expenseEventType;
+          session.expenseCategory = expense.category ?? expenseCategory;
+          if (explicitExpenseEvent) session.expenseTypeConfirmed = true;
+          session.pendingExpenseTypeLabel = undefined;
+
+          if (!session.expenseTypeConfirmed) {
+            session.step = 'ask_expense_type';
+            botReply = buildExpenseTypePrompt(`Recorded draft expense: GHS ${expenseAmount}.`, customExpenseItems);
+          } else if (!session.expenseCategory && expenseAmount > 0) {
+            session.step = 'ask_expense_category';
+            botReply = `Recorded expense type as ${humanizeEventType(session.expenseEventType)}. What was it spent on?`;
+          } else {
+            session.step = 'ask_sales';
+            botReply = `Recorded draft expense: GHS ${expenseAmount}. ${buildInflowQuestionForLogDate(session.logDateKey)} Reply NO if there was no inflow.`;
+          }
+        }
+      } else {
+        const amount = revenueParsed?.amount ?? parseAmount(trimmed);
+        if (amount === null) {
+          botReply = 'Please send the money inflow amount in cedis so I can save it as draft. Example: "Inflow 850". You can also reply NO if there was no inflow.';
+        } else {
+          const salesEventType = explicitSalesEvent ?? session.salesEventType ?? 'cash_sale';
+          const sales = await upsertDraft({
+            draftId: session.salesDraftId,
+            type: 'revenue',
+            amount,
+            date: logDate,
+            eventType: salesEventType,
+            category: revenueParsed?.category ?? session.salesCategory ?? 'Sales',
+            notes: revenueParsed?.notes
+          });
+          session.salesDraftId = sales.id;
+          session.salesEventType = salesEventType;
+          session.salesCategory = sales.category ?? 'Sales';
+          if (explicitSalesEvent) session.salesTypeConfirmed = true;
+          session.pendingSalesTypeLabel = undefined;
+          session.step = session.salesTypeConfirmed ? 'ask_expense' : 'ask_sales_type';
+          botReply = session.step === 'ask_sales_type'
+            ? buildSalesTypePrompt(`Recorded draft inflow: GHS ${amount}.`, customInflowItems)
+            : `Recorded draft inflow: GHS ${amount}. ${buildExpenseQuestionForLogDate(session.logDateKey)} (Reply NO if there was no expense.)`;
+        }
+      }
     }
   } else if (session.step === 'ask_sales_type') {
     const salesChoice = resolveSalesTypeChoice(trimmed, customInflowItems);
@@ -1207,7 +1507,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
         salesEventType: session.salesEventType,
         salesCategory: session.salesCategory,
         expenseAmount: 0
-      })}\n\nReply SAVE to confirm or EDIT to adjust.`;
+      })}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`;
     } else {
       const amount = expenseParsed?.amount ?? parseAmount(trimmed);
       if (amount === null) {
@@ -1246,7 +1546,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
             expenseAmount: amount,
             expenseEventType: session.expenseEventType,
             expenseCategory: session.expenseCategory
-          })}\n\nReply SAVE to confirm or EDIT to adjust.`;
+          })}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`;
         }
       }
     }
@@ -1301,7 +1601,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
           expenseAmount: expenseDraftLatest?.amount,
           expenseEventType: session.expenseEventType,
           expenseCategory: session.expenseCategory
-        })}\n\nReply SAVE to confirm or EDIT to adjust.`;
+        })}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`;
       }
     }
   } else if (session.step === 'confirm_expense_type_custom') {
@@ -1335,7 +1635,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
         expenseAmount: expenseDraftLatest?.amount,
         expenseEventType: session.expenseEventType,
         expenseCategory: session.expenseCategory
-      })}\n\nReply SAVE to confirm or EDIT to adjust.`;
+      })}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`;
     } else if (parseNoResponse(trimmed)) {
       session.pendingExpenseTypeLabel = undefined;
       session.step = 'ask_expense_type';
@@ -1375,7 +1675,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
         expenseAmount: updated.amount,
         expenseEventType: session.expenseEventType,
         expenseCategory: updated.category
-      })}\n\nReply SAVE to confirm or EDIT to adjust.`;
+      })}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`;
     }
   } else if (session.step === 'await_confirm') {
     if (/^(save|confirm|yes|y|ok|okay|done)$/i.test(lower)) {
@@ -1407,7 +1707,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
       session.pendingExpenseTypeLabel = undefined;
       botReply = 'Okay, let’s adjust the draft. What is the correct money inflow amount?';
     } else {
-      botReply = 'Reply SAVE to confirm these draft entries, or EDIT to change them.';
+      botReply = 'Reply SAVE to confirm these draft entries, EDIT to change them, BACK (0) for previous step, or CANCEL (99) to stop.';
     }
   }
 
@@ -1490,10 +1790,113 @@ export const mockPostBudget = async (body: {
   return budget;
 };
 
-export const mockGetWhatsAppProviderInfo = async () => defaultProviderInfo;
+export const mockGetReferralProgress = async (userId: string): Promise<ReferralProgress> => {
+  const user = users.find((entry) => entry.id === userId);
+  if (!user) throw new Error('User not found');
+  if (!user.referralCode) {
+    let code = createReferralCode(user.name);
+    while (userByReferralCode[code]) {
+      code = createReferralCode(user.name);
+    }
+    user.referralCode = code;
+    userByReferralCode[code] = user.id;
+  }
+
+  const conversions = referralConversionsByReferrer[userId] ?? [];
+  const rewards = referralRewardsByReferrer[userId] ?? [];
+  const totalRewardMonths = rewards.reduce((sum, item) => sum + item.grantedMonths, 0);
+  const progress = conversions.length % REFERRAL_MILESTONE_SIZE;
+  const remainingForNextReward = progress === 0 ? REFERRAL_MILESTONE_SIZE : REFERRAL_MILESTONE_SIZE - progress;
+
+  return {
+    referralCode: user.referralCode,
+    referralLink: `${window.location.origin}/?ref=${encodeURIComponent(user.referralCode)}`,
+    qualifiedReferrals: conversions.length,
+    rewardMilestoneSize: REFERRAL_MILESTONE_SIZE,
+    remainingForNextReward,
+    totalRewardMonths,
+    rewards: rewards.map((reward) => ({ ...reward })),
+    recentConversions: conversions
+      .slice()
+      .sort((a, b) => b.qualifiedAt.localeCompare(a.qualifiedAt))
+      .slice(0, 8)
+      .map((conversion) => {
+        const referredUser = users.find((entry) => entry.id === conversion.referredUserId);
+        return {
+          id: conversion.id,
+          qualifiedAt: conversion.qualifiedAt,
+          referredUser: {
+            id: referredUser?.id ?? conversion.referredUserId,
+            name: referredUser?.name ?? 'Unknown user',
+            businessName: referredUser?.businessName ?? null,
+            subscriptionStatus: referredUser?.subscriptionStatus ?? 'free'
+          }
+        };
+      })
+  };
+};
+
+export const mockGetAdminAnalytics = async (): Promise<AdminAnalytics> => {
+  const total = users.length;
+  const paid = users.filter((user) => user.subscriptionStatus === 'premium').length;
+  const trial = users.filter((user) => user.subscriptionStatus === 'trial').length;
+  const free = users.filter((user) => user.subscriptionStatus === 'free').length;
+  const businessCounts = users.reduce<Record<string, number>>((acc, user) => {
+    const key = user.businessType || 'Unspecified';
+    acc[key] = (acc[key] ?? 0) + 1;
+    return acc;
+  }, {});
+  const conversions = Object.values(referralConversionsByReferrer).reduce((sum, items) => sum + items.length, 0);
+  const rewards = Object.values(referralRewardsByReferrer).flat();
+
+  return {
+    users: {
+      total,
+      subscribed: paid + trial,
+      paid,
+      trial,
+      free
+    },
+    subscriptions: {
+      paidStarts: paid
+    },
+    referrals: {
+      qualifiedConversions: conversions,
+      rewardsGranted: rewards.length,
+      freeMonthsGranted: rewards.reduce((sum, item) => sum + item.grantedMonths, 0)
+    },
+    businessTypes: Object.entries(businessCounts)
+      .map(([type, count]) => ({ type, count }))
+      .sort((a, b) => b.count - a.count),
+    whatsapp: {
+      provider: activeProvider,
+      availableProviders: [...defaultProviderInfo.available]
+    }
+  };
+};
+
+export const mockGetAdminWhatsAppProvider = async (): Promise<{ provider: WhatsAppProvider; available: WhatsAppProvider[] }> => ({
+  provider: activeProvider,
+  available: [...defaultProviderInfo.available]
+});
+
+export const mockSetAdminWhatsAppProvider = async (
+  provider: WhatsAppProvider
+): Promise<{ provider: WhatsAppProvider; available: WhatsAppProvider[] }> => {
+  activeProvider = provider;
+  return {
+    provider: activeProvider,
+    available: [...defaultProviderInfo.available]
+  };
+};
+
+export const mockGetWhatsAppProviderInfo = async () => ({
+  default: activeProvider,
+  available: [...defaultProviderInfo.available]
+});
 
 export const mockSendWhatsAppMessage = async (to: string, message: string, provider?: string) => {
-  return { success: true, provider: provider ?? defaultProviderInfo.default, result: { message: 'Mock send queued' } };
+  return { success: true, provider: provider ?? activeProvider, result: { message: 'Mock send queued' } };
 };
 
 export const mockHealth = async (): Promise<boolean> => true;

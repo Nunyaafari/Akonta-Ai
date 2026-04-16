@@ -1,4 +1,5 @@
 import { config } from '../lib/env.js';
+import db from '../lib/db.js';
 
 export type WhatsAppProvider = 'twilio' | 'infobip';
 
@@ -62,11 +63,40 @@ export const resolveProvider = (provider?: string): WhatsAppProvider => {
   if (selected && availableProviders.includes(selected)) {
     return selected;
   }
-  return config.WHATSAPP_PROVIDER as WhatsAppProvider;
+  const fallback = config.WHATSAPP_PROVIDER as WhatsAppProvider;
+  return availableProviders.includes(fallback) ? fallback : 'twilio';
+};
+
+export const getConfiguredProvider = async (): Promise<WhatsAppProvider> => {
+  try {
+    const settings = await db.appConfig.findUnique({
+      where: { id: 'global' },
+      select: { whatsappProvider: true }
+    });
+    if (settings?.whatsappProvider) {
+      return settings.whatsappProvider;
+    }
+  } catch {
+    // fall back to env when table is not migrated yet
+  }
+  return resolveProvider();
+};
+
+export const setConfiguredProvider = async (provider: WhatsAppProvider): Promise<WhatsAppProvider> => {
+  const updated = await db.appConfig.upsert({
+    where: { id: 'global' },
+    update: { whatsappProvider: provider },
+    create: {
+      id: 'global',
+      whatsappProvider: provider
+    },
+    select: { whatsappProvider: true }
+  });
+  return updated.whatsappProvider;
 };
 
 export const sendWhatsAppMessage = async (to: string, message: string, provider?: string) => {
-  const selectedProvider = resolveProvider(provider);
+  const selectedProvider = provider ? resolveProvider(provider) : await getConfiguredProvider();
 
   if (selectedProvider === 'twilio') {
     return sendWithTwilio(to, message);

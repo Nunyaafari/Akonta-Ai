@@ -1,19 +1,46 @@
 import { useState, useEffect, useRef } from 'react';
-import { AppView, User, ChatMessage, Transaction, SummaryPayload, WhatsAppProvider, Budget, BudgetTargetType, MonthlyInsights, PremiumInsight } from './types';
+import { AppView, User, ChatMessage, Transaction, SummaryPayload, WhatsAppProvider, Budget, BudgetTargetType, MonthlyInsights, PremiumInsight, ReferralProgress, AdminAnalytics } from './types';
 import { 
-  WhatsAppIcon, ChartIcon, HistoryIcon, PremiumIcon, 
+  WhatsAppIcon, ChartIcon, HistoryIcon,
   SendIcon, TrendingUpIcon, TrendingDownIcon, HomeIcon, 
-  CalendarIcon, ArrowLeftIcon, CheckIcon, ClockIcon, BellIcon, ChatIcon, SettingsIcon 
+  CalendarIcon, ArrowLeftIcon, CheckIcon, ClockIcon, BellIcon, ChatIcon, SettingsIcon, ShieldIcon
 } from './components/Icons';
 import { 
   mockTransactions, currentWeekSummary, currentMonthSummary, 
   premiumInsights, chatMessages 
 } from './data/mockData';
 import SummaryChart from './components/SummaryChart';
-import { createUser, getTransactions, getWeeklySummary, getMonthlySummary, getCurrentInsights, getMonthlyInsights, getCurrentBudgets, getWhatsAppProviderInfo, postBudget, postChatEntry, registerDemoModeListener } from './lib/api';
+import {
+  activateUserSubscription,
+  createUser,
+  getAdminAnalytics,
+  getAdminWhatsAppProvider,
+  getCurrentBudgets,
+  getCurrentInsights,
+  getMonthlyInsights,
+  getMonthlySummary,
+  getReferralProgress,
+  getTransactions,
+  getWeeklySummary,
+  postBudget,
+  postChatEntry,
+  registerDemoModeListener,
+  setAdminWhatsAppProvider,
+  updateUser
+} from './lib/api';
 
 // Format currency
-const formatCurrency = (amount: number) => `GHS ${amount.toLocaleString()}`;
+const formatCurrencyValue = (amount: number, currencyCode = 'GHS') => {
+  try {
+    return new Intl.NumberFormat('en-GH', {
+      style: 'currency',
+      currency: currencyCode,
+      maximumFractionDigits: 2
+    }).format(amount);
+  } catch {
+    return `${currencyCode} ${amount.toLocaleString()}`;
+  }
+};
 
 // Format date
 const formatDate = (date: Date) => {
@@ -33,10 +60,10 @@ const formatTime = (date: Date) => {
   });
 };
 
-const currentMonthLabel = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
 const brandLogoSrc = '/brand/fav.svg';
 const brandMarkSrc = '/brand/fav.svg';
 const appCopyrightNotice = `© ${new Date().getFullYear()} All rights reserved. Amagold Technologies Ltd.`;
+const supportedCurrencies = ['GHS', 'USD', 'NGN', 'KES', 'EUR', 'GBP'] as const;
 
 const defaultWeeklySummary: SummaryPayload = {
   totalRevenue: currentWeekSummary.totalRevenue,
@@ -197,8 +224,14 @@ export default function App() {
   const [reportSummaryCache, setReportSummaryCache] = useState<Record<string, SummaryPayload>>({});
   const [reportInsightsCache, setReportInsightsCache] = useState<Record<string, MonthlyInsights>>({});
   const [dashboardTab, setDashboardTab] = useState<'overview' | 'reports'>('overview');
-  const [providerInfo, setProviderInfo] = useState<{ default: WhatsAppProvider; available: WhatsAppProvider[] } | null>(null);
   const [budgets, setBudgets] = useState<Budget[]>([]);
+  const [referralProgress, setReferralProgress] = useState<ReferralProgress | null>(null);
+  const [isReferralLoading, setIsReferralLoading] = useState(false);
+  const [referralCopyMessage, setReferralCopyMessage] = useState<string | null>(null);
+  const [adminAnalytics, setAdminAnalytics] = useState<AdminAnalytics | null>(null);
+  const [adminProviderInfo, setAdminProviderInfo] = useState<{ provider: WhatsAppProvider; available: WhatsAppProvider[] } | null>(null);
+  const [isAdminSaving, setIsAdminSaving] = useState(false);
+  const [adminError, setAdminError] = useState<string | null>(null);
   const [budgetTargetType, setBudgetTargetType] = useState<BudgetTargetType>('expense');
   const [budgetAmount, setBudgetAmount] = useState('');
   const [isDemoMode, setIsDemoMode] = useState(false);
@@ -219,6 +252,10 @@ export default function App() {
   const [historyEndDate, setHistoryEndDate] = useState('');
   const [historyTransactionTypeFilter, setHistoryTransactionTypeFilter] = useState<'all' | 'revenue' | 'expense'>('all');
   const [historyAttachmentFilter, setHistoryAttachmentFilter] = useState<'all' | 'with' | 'without'>('all');
+  const [settingsCurrencyCode, setSettingsCurrencyCode] = useState<'GHS' | 'USD' | 'NGN' | 'KES' | 'EUR' | 'GBP'>('GHS');
+
+  const activeCurrencyCode = user?.currencyCode ?? 'GHS';
+  const formatCurrency = (amount: number) => formatCurrencyValue(amount, activeCurrencyCode);
   
   // Onboarding form state
   const [formData, setFormData] = useState<{
@@ -234,6 +271,7 @@ export default function App() {
     businessType: '',
     preferredTime: 'evening'
   });
+  const [onboardingReferralCode, setOnboardingReferralCode] = useState<string | null>(null);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
 
@@ -481,7 +519,7 @@ export default function App() {
     <div class="section">Income</div>
     <table>
       <thead>
-        <tr><th>Account</th><th class="amount">Amount (GHS)</th></tr>
+        <tr><th>Account</th><th class="amount">Amount (${escapeHtml(activeCurrencyCode)})</th></tr>
       </thead>
       <tbody>
         ${incomeRows}
@@ -494,7 +532,7 @@ export default function App() {
     <div class="section">Less: Business Expenses</div>
     <table>
       <thead>
-        <tr><th>Account</th><th class="amount">Amount (GHS)</th></tr>
+        <tr><th>Account</th><th class="amount">Amount (${escapeHtml(activeCurrencyCode)})</th></tr>
       </thead>
       <tbody>
         ${expenseRows}
@@ -731,6 +769,30 @@ export default function App() {
     setView('attach');
   };
 
+  const refreshReferralData = async () => {
+    if (!user) return;
+    setIsReferralLoading(true);
+    try {
+      const referral = await getReferralProgress(user.id);
+      setReferralProgress(referral);
+    } catch (error) {
+      console.error('Unable to refresh referral progress', error);
+    } finally {
+      setIsReferralLoading(false);
+    }
+  };
+
+  const copyReferralLink = async () => {
+    if (!referralProgress?.referralLink) return;
+    try {
+      await navigator.clipboard.writeText(referralProgress.referralLink);
+      setReferralCopyMessage('Referral link copied.');
+    } catch {
+      setReferralCopyMessage('Unable to copy automatically. Please copy it manually.');
+    }
+    setTimeout(() => setReferralCopyMessage(null), 2400);
+  };
+
   const heroSlides = [
     {
       title: 'Your Accountant',
@@ -819,6 +881,15 @@ export default function App() {
     : dashboardTopExpenseCategories;
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const referral = params.get('ref');
+    if (referral && referral.trim()) {
+      setOnboardingReferralCode(referral.trim());
+      setView('onboarding');
+    }
+  }, []);
+
+  useEffect(() => {
     const savedUser = window.localStorage.getItem('akontaai-user');
     if (savedUser) {
       try {
@@ -837,6 +908,15 @@ export default function App() {
       window.localStorage.removeItem('akontaai-user');
     }
   }, [user]);
+
+  useEffect(() => {
+    const current = (user?.currencyCode ?? 'GHS').toUpperCase();
+    if (supportedCurrencies.includes(current as typeof supportedCurrencies[number])) {
+      setSettingsCurrencyCode(current as typeof supportedCurrencies[number]);
+    } else {
+      setSettingsCurrencyCode('GHS');
+    }
+  }, [user?.currencyCode]);
 
   useEffect(() => {
     const standalone = window.matchMedia('(display-mode: standalone)').matches
@@ -915,7 +995,7 @@ export default function App() {
         const weekEnd = new Date(now);
         weekEnd.setHours(23, 59, 59, 999);
 
-        const [txs, weekly, monthly, insights] = await Promise.all([
+        const [txs, weekly, monthly, insights, referral] = await Promise.all([
           getTransactions(user.id),
           getWeeklySummary(
             user.id,
@@ -923,13 +1003,15 @@ export default function App() {
             weekEnd.toISOString().slice(0, 10)
           ),
           getMonthlySummary(user.id, now.getUTCFullYear(), now.getUTCMonth() + 1),
-          getCurrentInsights(user.id)
+          getCurrentInsights(user.id),
+          getReferralProgress(user.id)
         ]);
 
         setTransactions(txs);
         setWeeklySummary(weekly.summary);
         setMonthlySummary(monthly.summary);
         setCurrentInsights(insights);
+        setReferralProgress(referral);
         const currentKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
         setReportSummaryCache((prev) => ({ ...prev, [currentKey]: monthly.summary }));
         setReportInsightsCache((prev) => ({ ...prev, [currentKey]: insights }));
@@ -994,15 +1076,6 @@ export default function App() {
   useEffect(() => {
     registerDemoModeListener(() => setIsDemoMode(true));
 
-    const loadProviderInfo = async () => {
-      try {
-        const info = await getWhatsAppProviderInfo();
-        setProviderInfo(info);
-      } catch (error) {
-        console.error('Unable to load WhatsApp provider info', error);
-      }
-    };
-
     const loadBudgets = async () => {
       if (!user) return;
       try {
@@ -1018,8 +1091,41 @@ export default function App() {
       }
     };
 
-    loadProviderInfo();
     loadBudgets();
+  }, [user]);
+
+  useEffect(() => {
+    if (!user?.isSuperAdmin) {
+      setAdminAnalytics(null);
+      setAdminProviderInfo(null);
+      return;
+    }
+
+    let cancelled = false;
+    const loadAdminData = async () => {
+      try {
+        const [analytics, provider] = await Promise.all([
+          getAdminAnalytics(),
+          getAdminWhatsAppProvider()
+        ]);
+        if (!cancelled) {
+          setAdminAnalytics(analytics);
+          setAdminProviderInfo(provider);
+          setAdminError(null);
+        }
+      } catch (error) {
+        console.error('Unable to load admin data', error);
+        if (!cancelled) {
+          setAdminError('Unable to load admin analytics right now.');
+        }
+      }
+    };
+
+    loadAdminData();
+
+    return () => {
+      cancelled = true;
+    };
   }, [user]);
 
   useEffect(() => {
@@ -1110,43 +1216,87 @@ export default function App() {
               </div>
             </div>
 
-            {/* Chat Preview */}
-            <div className="max-w-md mx-auto">
+            {/* Chat + P&L Preview */}
+            <div className="mx-auto mt-2 grid max-w-5xl gap-6 lg:grid-cols-2">
               <div className="bg-white rounded-3xl shadow-2xl shadow-gray-200 overflow-hidden border border-gray-100">
                 <div className="bg-green-600 px-4 py-3 flex items-center gap-3">
                   <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center p-1.5">
                     <img src={brandMarkSrc} alt="Akonta AI logo mark" className="h-full w-full object-contain" />
                   </div>
                   <div>
-                    <p className="text-white font-semibold">Akonta AI</p>
+                    <p className="text-white font-semibold">Akonta AI Chatflow</p>
                     <p className="text-green-100 text-xs">Online</p>
                   </div>
                 </div>
                 <div className="p-4 space-y-3 bg-gray-50 min-h-[300px]">
                   <div className="flex justify-start">
                     <div className="bg-white rounded-2xl rounded-tl-sm px-4 py-2 shadow-sm max-w-[80%]">
-                      <p className="text-gray-800">Good morning! ☀️ How did your business do yesterday?</p>
+                      <p className="text-gray-800">Good morning! ☀️ How much money inflow came in today?</p>
                     </div>
                   </div>
                   <div className="flex justify-end">
                     <div className="bg-green-500 rounded-2xl rounded-tr-sm px-4 py-2 shadow-sm max-w-[80%]">
-                      <p className="text-white">I made 500 cedis</p>
+                      <p className="text-white">I made 4500</p>
                     </div>
                   </div>
                   <div className="flex justify-start">
                     <div className="bg-white rounded-2xl rounded-tl-sm px-4 py-2 shadow-sm max-w-[80%]">
-                      <p className="text-gray-800">Great! I recorded GHS 500 as revenue. Any expenses? 💰</p>
+                      <p className="text-gray-800">Recorded draft inflow: GHS 4500. What type was this? Reply with 1-6.</p>
                     </div>
                   </div>
                   <div className="flex justify-end">
                     <div className="bg-green-500 rounded-2xl rounded-tr-sm px-4 py-2 shadow-sm max-w-[80%]">
-                      <p className="text-white">Spent 100 on transport</p>
+                      <p className="text-white">2</p>
                     </div>
                   </div>
                   <div className="flex justify-start">
                     <div className="bg-white rounded-2xl rounded-tl-sm px-4 py-2 shadow-sm max-w-[80%]">
-                      <p className="text-gray-800">✅ Revenue: GHS 500<br/>✅ Expense: GHS 100<br/><br/><strong>Profit: GHS 400</strong> 🎉</p>
+                      <p className="text-gray-800">Saved. Entries are confirmed and your statement is updated.</p>
                     </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-3xl shadow-2xl shadow-gray-200 border border-gray-100 p-5">
+                <div className="mb-4">
+                  <p className="text-sm font-semibold text-gray-900">Profit & Loss Statement</p>
+                </div>
+
+                <div className="rounded-2xl border border-gray-200 overflow-hidden">
+                  <div className="bg-gray-50 border-b border-gray-200 px-4 py-3">
+                    <p className="text-sm font-semibold text-gray-900">Business Profit & Loss</p>
+                    <p className="text-xs text-gray-500">For the month ended April 2026</p>
+                  </div>
+
+                  <div className="px-4 py-3 space-y-3">
+                    <div>
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 mb-1">Income</p>
+                      <div className="space-y-1 text-sm">
+                        <div className="flex items-center justify-between"><span className="text-gray-700">Cash sales</span><span className="font-medium text-gray-900">GHS 4,500</span></div>
+                        <div className="flex items-center justify-between"><span className="text-gray-700">MoMo sales</span><span className="font-medium text-gray-900">GHS 1,800</span></div>
+                        <div className="flex items-center justify-between"><span className="text-gray-700">Debtor recovery</span><span className="font-medium text-gray-900">GHS 700</span></div>
+                      </div>
+                      <div className="mt-2 border-t border-dashed border-gray-300 pt-2 flex items-center justify-between text-sm font-semibold">
+                        <span>Total Income</span><span>GHS 7,000</span>
+                      </div>
+                    </div>
+
+                    <div className="border-t border-gray-200 pt-3">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 mb-1">Less: Business Expenses</p>
+                      <div className="space-y-1 text-sm">
+                        <div className="flex items-center justify-between"><span className="pl-3 text-gray-700">Stock purchase</span><span className="font-medium text-gray-900">GHS 3,200</span></div>
+                        <div className="flex items-center justify-between"><span className="pl-3 text-gray-700">Operating expense</span><span className="font-medium text-gray-900">GHS 1,100</span></div>
+                        <div className="flex items-center justify-between"><span className="pl-3 text-gray-700">Owner withdrawal</span><span className="font-medium text-gray-900">GHS 650</span></div>
+                      </div>
+                      <div className="mt-2 border-t border-dashed border-gray-300 pt-2 flex items-center justify-between text-sm font-semibold">
+                        <span>Total Expenses</span><span>GHS 4,950</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-green-50 border-t border-green-200 px-4 py-3 flex items-center justify-between">
+                    <span className="text-sm font-semibold text-gray-900">Net Profit</span>
+                    <span className="text-base font-bold text-green-700">GHS 2,050</span>
                   </div>
                 </div>
               </div>
@@ -1211,7 +1361,7 @@ export default function App() {
                   <span className="rounded-full bg-green-500 px-3 py-1 text-xs font-semibold text-white">Most Popular</span>
                 </div>
                 <div className="py-8 text-center">
-                  <p className="text-5xl font-bold text-gray-900">¢30</p>
+                  <p className="text-5xl font-bold text-gray-900">¢50</p>
                   <p className="text-sm text-gray-500">/mo</p>
                 </div>
                 <div className="space-y-3 mb-6 text-sm text-gray-600">
@@ -1222,10 +1372,61 @@ export default function App() {
                   <p>✅ Downloadable PDF reports</p>
                 </div>
                 <button
-                  onClick={() => setView('premium')}
+                  onClick={() => setView('onboarding')}
                   className="w-full py-4 rounded-2xl bg-green-500 text-white font-semibold hover:bg-green-600 transition-colors"
                 >
-                  Upgrade Now
+                  Start Free Trial
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-10 grid gap-6 md:grid-cols-2">
+              <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+                <h2 className="text-lg font-semibold text-gray-900 mb-4">Premium Insights Preview</h2>
+                <div className="space-y-3">
+                  {premiumInsightCards.slice(0, 3).map((insight) => (
+                    <div key={insight.id} className="rounded-xl border border-gray-100 bg-gray-50 p-4">
+                      <div className="flex items-start gap-3">
+                        <span className="text-xl">{insight.icon}</span>
+                        <div>
+                          <p className="font-semibold text-gray-900">{insight.title}</p>
+                          <p className="text-sm text-gray-600">{insight.message}</p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+                <h2 className="text-lg font-semibold text-gray-900 mb-4">Premium Expense Breakdown</h2>
+                <div className="space-y-3">
+                  {premiumExpenseCategories.slice(0, 5).map((cat, i) => {
+                    const percentage = activeMonthlySummary.totalExpenses > 0
+                      ? (cat.amount / activeMonthlySummary.totalExpenses) * 100
+                      : 0;
+                    const colors = ['bg-red-500', 'bg-orange-500', 'bg-yellow-500', 'bg-green-500', 'bg-blue-500'];
+                    return (
+                      <div key={cat.category}>
+                        <div className="mb-1 flex justify-between text-sm">
+                          <span className="text-gray-600">{cat.category}</span>
+                          <span className="font-medium text-gray-900">{formatCurrency(cat.amount)}</span>
+                        </div>
+                        <div className="h-2 overflow-hidden rounded-full bg-gray-100">
+                          <div
+                            className={`h-full ${colors[i]} rounded-full`}
+                            style={{ width: `${percentage}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <button
+                  onClick={() => setView('onboarding')}
+                  className="mt-6 w-full rounded-2xl bg-green-500 py-3 text-sm font-semibold text-white hover:bg-green-600 transition-colors"
+                >
+                  Start Premium Trial
                 </button>
               </div>
             </div>
@@ -1317,10 +1518,18 @@ export default function App() {
           businessType: formData.businessType,
           preferredTime: formData.preferredTime,
           timezone: 'Africa/Accra',
+          currencyCode: 'GHS',
+          referralCode: onboardingReferralCode ?? undefined,
           subscriptionStatus: 'trial'
         });
 
         setUser(savedUser);
+        if (onboardingReferralCode) {
+          const nextUrl = new URL(window.location.href);
+          nextUrl.searchParams.delete('ref');
+          window.history.replaceState({}, '', nextUrl.toString());
+          setOnboardingReferralCode(null);
+        }
         setView('chat');
       } catch (err) {
         console.error(err);
@@ -1359,6 +1568,11 @@ export default function App() {
           <div className="max-w-md mx-auto text-center">
             <h1 className="text-2xl font-bold text-gray-900 mb-2">{currentStep.title}</h1>
             <p className="text-gray-500 mb-8">{currentStep.subtitle}</p>
+            {onboardingReferralCode && (
+              <p className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-700">
+                Referral applied: {onboardingReferralCode}
+              </p>
+            )}
 
             {currentStep.options ? (
               <div className="space-y-3">
@@ -1498,8 +1712,8 @@ export default function App() {
               { id: 'chat' as AppView, icon: ChatIcon, label: 'Chat' },
               { id: 'dashboard' as AppView, icon: ChartIcon, label: 'Dashboard' },
               { id: 'history' as AppView, icon: HistoryIcon, label: 'History' },
-              { id: 'premium' as AppView, icon: PremiumIcon, label: 'Premium' },
               { id: 'settings' as AppView, icon: SettingsIcon, label: 'Settings' },
+              ...(user?.isSuperAdmin ? [{ id: 'admin' as AppView, icon: ShieldIcon, label: 'Admin' }] : [])
             ].map((item) => (
               <button
                 key={item.id}
@@ -1891,14 +2105,14 @@ export default function App() {
 
         let botText = result.botReply;
         if (result.budgetStatuses.length > 0) {
-          const expenseBudget = result.budgetStatuses.find((status) => status.budget.targetType === 'expense');
-          if (expenseBudget) {
-            if (expenseBudget.status === 'overBudget') {
-              botText += `\n\nExpense alert: you are over budget by GHS ${Math.abs(expenseBudget.remaining)}.`;
-            } else if (expenseBudget.status === 'nearTarget') {
-              botText += `\n\nExpense watch: you have used ${Math.round(expenseBudget.percentUsed)}% of your budget.`;
+            const expenseBudget = result.budgetStatuses.find((status) => status.budget.targetType === 'expense');
+            if (expenseBudget) {
+              if (expenseBudget.status === 'overBudget') {
+              botText += `\n\nExpense alert: you are over budget by ${formatCurrency(Math.abs(expenseBudget.remaining))}.`;
+              } else if (expenseBudget.status === 'nearTarget') {
+                botText += `\n\nExpense watch: you have used ${Math.round(expenseBudget.percentUsed)}% of your budget.`;
+              }
             }
-          }
         }
 
         const botResponse: ChatMessage = {
@@ -2212,10 +2426,10 @@ export default function App() {
                   <p className="text-amber-100 text-sm">7 days remaining</p>
                 </div>
                 <button 
-                  onClick={() => setView('premium')}
+                  onClick={() => setView('landing')}
                   className="bg-white text-amber-600 px-4 py-2 rounded-full font-medium text-sm"
                 >
-                  Upgrade
+                  View Plans
                 </button>
               </div>
             </div>
@@ -2443,91 +2657,161 @@ export default function App() {
     );
   }
 
-  // Premium View
-  if (view === 'premium') {
+  if (view === 'admin') {
+    const refreshAdmin = async () => {
+      if (!user?.isSuperAdmin) return;
+      setAdminError(null);
+      try {
+        const [analytics, provider] = await Promise.all([
+          getAdminAnalytics(),
+          getAdminWhatsAppProvider()
+        ]);
+        setAdminAnalytics(analytics);
+        setAdminProviderInfo(provider);
+      } catch (error) {
+        console.error('Unable to refresh admin analytics', error);
+        setAdminError('Unable to refresh admin data.');
+      }
+    };
+
+    const handleProviderUpdate = async (provider: WhatsAppProvider) => {
+      setIsAdminSaving(true);
+      setAdminError(null);
+      try {
+        const updated = await setAdminWhatsAppProvider(provider);
+        setAdminProviderInfo(updated);
+        const analytics = await getAdminAnalytics();
+        setAdminAnalytics(analytics);
+      } catch (error) {
+        console.error('Unable to update provider setting', error);
+        setAdminError('Unable to update WhatsApp provider.');
+      } finally {
+        setIsAdminSaving(false);
+      }
+    };
+
+    if (!user?.isSuperAdmin) {
+      return (
+        <div className="min-h-screen bg-gray-50 pb-20">
+          <div className="bg-white px-4 py-6 border-b border-gray-100">
+            <h1 className="text-2xl font-bold text-gray-900">Super Admin</h1>
+            <p className="text-sm text-gray-500">Access is restricted to super admin accounts.</p>
+          </div>
+          <div className="px-4 py-6">
+            <div className="rounded-3xl border border-amber-200 bg-amber-50 p-6 text-sm text-amber-800">
+              You do not have super admin access for this account.
+            </div>
+          </div>
+          <BottomNav />
+        </div>
+      );
+    }
+
     return (
       <div className="min-h-screen bg-gray-50 pb-20">
-        <div className="bg-gradient-to-br from-purple-600 to-indigo-600 px-4 pt-6 pb-8">
-          <h1 className="text-2xl font-bold text-white mb-2">Go Premium</h1>
-          <p className="text-purple-100">Unlock powerful insights for your business</p>
-        </div>
-
-        <div className="px-4 -mt-4">
-          {/* Pricing Card */}
-          <div className="bg-white rounded-2xl shadow-lg shadow-gray-200 p-6 mb-6">
-            <div className="text-center mb-6">
-              <p className="text-gray-500 text-sm mb-2">Starting at</p>
-              <p className="text-4xl font-bold text-gray-900">GHS 30<span className="text-lg text-gray-500">/month</span></p>
-              <p className="text-green-600 text-sm font-medium mt-1">7-day free trial included</p>
+        <div className="bg-white px-4 py-6 border-b border-gray-100">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900">Super Admin</h1>
+              <p className="text-gray-500 text-sm">Subscriptions, referrals, business mix, and channel settings</p>
             </div>
-            <div className="space-y-3 mb-6">
-              {[
-                'Advanced expense breakdown',
-                'Profit trend analysis',
-                'AI-powered recommendations',
-                'Downloadable PDF reports',
-                'Cash flow warnings',
-                'Priority support',
-                'Multi-channel WhatsApp support (Twilio, Infobip)'
-              ].map((feature) => (
-                <div key={feature} className="flex items-center gap-3">
-                  <div className="w-5 h-5 bg-green-100 rounded-full flex items-center justify-center">
-                    <CheckIcon className="text-green-600" size={12} />
-                  </div>
-                  <span className="text-gray-700">{feature}</span>
-                </div>
-              ))}
-            </div>
-            <button className="w-full py-4 bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-2xl font-semibold hover:opacity-90 transition-opacity">
-              Start Free Trial
+            <button
+              onClick={refreshAdmin}
+              className="rounded-full border border-gray-300 px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+            >
+              Refresh
             </button>
           </div>
+        </div>
 
-          {/* Premium Insights Preview */}
-          <div className="mb-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">{currentInsights ? 'Live Insights' : 'Sample Insights'}</h2>
-            <div className="space-y-3">
-              {premiumInsightCards.map((insight) => (
-                <div key={insight.id} className="bg-white rounded-xl p-4 shadow-sm relative overflow-hidden">
-                  <div className="absolute top-0 right-0 opacity-10">
-                    <span className="text-6xl">{insight.icon}</span>
-                  </div>
-                  <div className="flex items-start gap-3">
-                    <span className="text-2xl">{insight.icon}</span>
-                    <div>
-                      <p className="font-semibold text-gray-900">{insight.title}</p>
-                      <p className="text-gray-600 text-sm">{insight.message}</p>
-                    </div>
-                  </div>
-                </div>
+        <div className="px-4 py-6 space-y-4">
+          {adminError && (
+            <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+              {adminError}
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-2xl bg-white p-4 shadow-sm">
+              <p className="text-xs uppercase tracking-wide text-gray-500">Total users</p>
+              <p className="mt-2 text-2xl font-bold text-gray-900">{adminAnalytics?.users.total ?? '-'}</p>
+            </div>
+            <div className="rounded-2xl bg-white p-4 shadow-sm">
+              <p className="text-xs uppercase tracking-wide text-gray-500">Subscribed users</p>
+              <p className="mt-2 text-2xl font-bold text-gray-900">{adminAnalytics?.users.subscribed ?? '-'}</p>
+            </div>
+            <div className="rounded-2xl bg-white p-4 shadow-sm">
+              <p className="text-xs uppercase tracking-wide text-gray-500">Paid users</p>
+              <p className="mt-2 text-2xl font-bold text-gray-900">{adminAnalytics?.users.paid ?? '-'}</p>
+            </div>
+            <div className="rounded-2xl bg-white p-4 shadow-sm">
+              <p className="text-xs uppercase tracking-wide text-gray-500">Free users</p>
+              <p className="mt-2 text-2xl font-bold text-gray-900">{adminAnalytics?.users.free ?? '-'}</p>
+            </div>
+          </div>
+
+          <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+            <h2 className="text-lg font-semibold text-gray-900">WhatsApp provider</h2>
+            <p className="mt-1 text-sm text-gray-500">Global provider used for outbound WhatsApp messages.</p>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              {adminProviderInfo?.available.map((provider) => (
+                <button
+                  key={provider}
+                  onClick={() => handleProviderUpdate(provider)}
+                  disabled={isAdminSaving}
+                  className={`rounded-2xl border px-4 py-3 text-left text-sm font-semibold transition-colors ${
+                    adminProviderInfo.provider === provider
+                      ? 'border-green-600 bg-green-50 text-green-700'
+                      : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
+                  } disabled:cursor-not-allowed disabled:opacity-70`}
+                >
+                  {provider}
+                </button>
               ))}
             </div>
           </div>
 
-          {/* Expense Categories */}
-          <div className="bg-white rounded-2xl shadow-lg shadow-gray-200 p-6 mb-6">
-            <h3 className="font-semibold text-gray-900 mb-4">Expense Breakdown</h3>
-            <div className="space-y-3">
-              {premiumExpenseCategories.map((cat, i) => {
-                const percentage = activeMonthlySummary.totalExpenses > 0
-                  ? (cat.amount / activeMonthlySummary.totalExpenses) * 100
-                  : 0;
-                const colors = ['bg-red-500', 'bg-orange-500', 'bg-yellow-500', 'bg-green-500', 'bg-blue-500'];
-                return (
-                  <div key={cat.category}>
-                    <div className="flex justify-between text-sm mb-1">
-                      <span className="text-gray-600">{cat.category}</span>
-                      <span className="font-medium text-gray-900">{formatCurrency(cat.amount)}</span>
+          <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+            <h2 className="text-lg font-semibold text-gray-900 mb-3">Business type distribution</h2>
+            {adminAnalytics?.businessTypes.length ? (
+              <div className="space-y-3">
+                {adminAnalytics.businessTypes.map((entry) => {
+                  const percentage = adminAnalytics.users.total > 0
+                    ? (entry.count / adminAnalytics.users.total) * 100
+                    : 0;
+                  return (
+                    <div key={entry.type}>
+                      <div className="mb-1 flex items-center justify-between text-sm">
+                        <span className="text-gray-700">{entry.type}</span>
+                        <span className="font-semibold text-gray-900">{entry.count}</span>
+                      </div>
+                      <div className="h-2 overflow-hidden rounded-full bg-gray-100">
+                        <div className="h-full rounded-full bg-green-500" style={{ width: `${percentage}%` }} />
+                      </div>
                     </div>
-                    <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                      <div 
-                        className={`h-full ${colors[i]} rounded-full`}
-                        style={{ width: `${percentage}%` }}
-                      ></div>
-                    </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="text-sm text-gray-500">No business profile data yet.</p>
+            )}
+          </div>
+
+          <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+            <h2 className="text-lg font-semibold text-gray-900 mb-2">Referral performance</h2>
+            <div className="grid grid-cols-3 gap-3 text-center">
+              <div className="rounded-2xl bg-gray-50 px-3 py-4">
+                <p className="text-xs text-gray-500">Qualified</p>
+                <p className="mt-1 text-xl font-bold text-gray-900">{adminAnalytics?.referrals.qualifiedConversions ?? '-'}</p>
+              </div>
+              <div className="rounded-2xl bg-gray-50 px-3 py-4">
+                <p className="text-xs text-gray-500">Rewards</p>
+                <p className="mt-1 text-xl font-bold text-gray-900">{adminAnalytics?.referrals.rewardsGranted ?? '-'}</p>
+              </div>
+              <div className="rounded-2xl bg-gray-50 px-3 py-4">
+                <p className="text-xs text-gray-500">Free months</p>
+                <p className="mt-1 text-xl font-bold text-gray-900">{adminAnalytics?.referrals.freeMonthsGranted ?? '-'}</p>
+              </div>
             </div>
           </div>
         </div>
@@ -2571,9 +2855,45 @@ export default function App() {
         const now = new Date();
         const currentKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
         setReportInsightsCache((prev) => ({ ...prev, [currentKey]: latestInsights }));
-      } catch (error) {
-        console.error('Unable to save budget', error);
+      } catch (budgetSaveError) {
+        console.error('Unable to save budget', budgetSaveError);
         setError('Unable to save budget. Please try again.');
+      } finally {
+        setIsSaving(false);
+      }
+    };
+
+    const handleSaveCurrency = async () => {
+      if (!user) return;
+      setIsSaving(true);
+      setError(null);
+      try {
+        const updated = await updateUser(user.id, { currencyCode: settingsCurrencyCode });
+        setUser(updated);
+      } catch (currencyError) {
+        console.error('Unable to update currency', currencyError);
+        setError('Unable to save currency preference right now.');
+      } finally {
+        setIsSaving(false);
+      }
+    };
+
+    const handleDemoPremiumActivation = async () => {
+      if (!user) return;
+      setIsSaving(true);
+      setError(null);
+      try {
+        const updated = await activateUserSubscription(user.id, {
+          status: 'premium',
+          source: 'paid',
+          months: 1,
+          note: 'Demo premium activation'
+        });
+        setUser(updated);
+        await refreshReferralData();
+      } catch (subscriptionError) {
+        console.error('Unable to activate subscription', subscriptionError);
+        setError('Unable to activate subscription.');
       } finally {
         setIsSaving(false);
       }
@@ -2585,25 +2905,91 @@ export default function App() {
           <div className="flex items-center justify-between gap-3">
             <div>
               <h1 className="text-2xl font-bold text-gray-900">Settings</h1>
-              <p className="text-gray-500 text-sm">Channel, provider, and budget targets</p>
+              <p className="text-gray-500 text-sm">Preferences, referral rewards, and budget targets</p>
             </div>
           </div>
         </div>
 
         <div className="px-4 py-6 space-y-4">
           <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
-            <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">Currency preference</h2>
+            <div className="grid gap-3 sm:grid-cols-2">
               <div>
-                <p className="text-sm text-gray-500">Active WhatsApp Provider</p>
-                <p className="text-lg font-semibold text-gray-900">{providerInfo?.default ?? 'Loading...'}</p>
+                <label className="mb-2 block text-sm font-medium text-gray-700">Default currency</label>
+                <select
+                  value={settingsCurrencyCode}
+                  onChange={(event) => setSettingsCurrencyCode(event.target.value as typeof supportedCurrencies[number])}
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                >
+                  {supportedCurrencies.map((code) => (
+                    <option key={code} value={code}>{code}</option>
+                  ))}
+                </select>
               </div>
-              <div className="inline-flex items-center rounded-full bg-green-50 px-3 py-1 text-sm font-semibold text-green-700">
-                Admin controlled
+              <div className="rounded-2xl bg-gray-50 px-4 py-3">
+                <p className="text-xs uppercase tracking-wide text-gray-500">Preview</p>
+                <p className="mt-2 text-xl font-semibold text-gray-900">{formatCurrencyValue(4500, settingsCurrencyCode)}</p>
               </div>
             </div>
-            <p className="text-sm text-gray-600">
-              Web chat is always available. WhatsApp messages use the configured provider.
-            </p>
+            <button
+              onClick={handleSaveCurrency}
+              disabled={isSaving}
+              className="mt-4 inline-flex items-center justify-center rounded-2xl bg-green-500 px-5 py-3 text-sm font-semibold text-white hover:bg-green-600 disabled:opacity-50"
+            >
+              {isSaving ? 'Saving...' : 'Save Currency'}
+            </button>
+          </div>
+
+          <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
+            <div className="mb-4 flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">Referral rewards</h2>
+                <p className="text-sm text-gray-500">Invite 5 paid users and unlock 3 free premium months.</p>
+              </div>
+              <button
+                onClick={refreshReferralData}
+                className="rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+              >
+                Refresh
+              </button>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3">
+              <div className="rounded-2xl bg-gray-50 px-3 py-3 text-center">
+                <p className="text-xs text-gray-500">Qualified</p>
+                <p className="mt-1 text-xl font-bold text-gray-900">{referralProgress?.qualifiedReferrals ?? '-'}</p>
+              </div>
+              <div className="rounded-2xl bg-gray-50 px-3 py-3 text-center">
+                <p className="text-xs text-gray-500">To next reward</p>
+                <p className="mt-1 text-xl font-bold text-gray-900">{referralProgress?.remainingForNextReward ?? '-'}</p>
+              </div>
+              <div className="rounded-2xl bg-gray-50 px-3 py-3 text-center">
+                <p className="text-xs text-gray-500">Free months</p>
+                <p className="mt-1 text-xl font-bold text-gray-900">{referralProgress?.totalRewardMonths ?? '-'}</p>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3">
+              <p className="text-xs uppercase tracking-wide text-gray-500">Your referral link</p>
+              <p className="mt-2 break-all text-sm text-gray-800">{referralProgress?.referralLink ?? (isReferralLoading ? 'Loading...' : 'Unavailable')}</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  onClick={copyReferralLink}
+                  disabled={!referralProgress?.referralLink}
+                  className="rounded-full bg-green-600 px-4 py-2 text-xs font-semibold text-white hover:bg-green-700 disabled:opacity-50"
+                >
+                  Copy Link
+                </button>
+                <button
+                  onClick={handleDemoPremiumActivation}
+                  disabled={isSaving}
+                  className="rounded-full border border-gray-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  Mark This Account Paid (Demo)
+                </button>
+              </div>
+              {referralCopyMessage && <p className="mt-2 text-xs text-green-700">{referralCopyMessage}</p>}
+            </div>
           </div>
 
           <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
@@ -2621,7 +3007,7 @@ export default function App() {
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Amount (GHS)</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Amount ({activeCurrencyCode})</label>
                 <input
                   type="number"
                   min="0"
@@ -2650,7 +3036,7 @@ export default function App() {
                 {budgets.map((budget) => (
                   <div key={budget.id} className="rounded-2xl border border-gray-200 bg-gray-50 p-4">
                     <p className="text-sm text-gray-500 capitalize">{budget.targetType} budget</p>
-                    <p className="text-xl font-semibold text-gray-900">GHS {budget.amount.toLocaleString()}</p>
+                    <p className="text-xl font-semibold text-gray-900">{formatCurrency(budget.amount)}</p>
                     {budget.category && <p className="text-sm text-gray-500">Category: {budget.category}</p>}
                   </div>
                 ))}
@@ -2665,6 +3051,19 @@ export default function App() {
               <p>When you log entries, the chat bot will tell you if you are near or over budget.</p>
             </div>
           </div>
+
+          {user?.isSuperAdmin && (
+            <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
+              <h2 className="text-lg font-semibold text-gray-900 mb-2">Super admin tools</h2>
+              <p className="text-sm text-gray-600">Manage global analytics and WhatsApp provider selection from the admin panel.</p>
+              <button
+                onClick={() => setView('admin')}
+                className="mt-4 rounded-2xl bg-gray-900 px-4 py-2 text-sm font-semibold text-white hover:bg-black"
+              >
+                Open Super Admin Panel
+              </button>
+            </div>
+          )}
         </div>
 
         <BottomNav />

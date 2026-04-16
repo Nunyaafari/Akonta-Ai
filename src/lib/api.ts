@@ -1,6 +1,25 @@
-import type { Transaction, User, SummaryPayload, WhatsAppProvider, Budget, BudgetStatus, BudgetTargetType, MonthlyInsights } from '../types';
+import type {
+  AdminAnalytics,
+  Transaction,
+  User,
+  SummaryPayload,
+  WhatsAppProvider,
+  Budget,
+  BudgetStatus,
+  BudgetTargetType,
+  MonthlyInsights,
+  ReferralProgress
+} from '../types';
 import {
   mockCreateUser,
+  mockGetUser,
+  mockListUsers,
+  mockUpdateUser,
+  mockActivateUserSubscription,
+  mockGetReferralProgress,
+  mockGetAdminAnalytics,
+  mockGetAdminWhatsAppProvider,
+  mockSetAdminWhatsAppProvider,
   mockGetTransactions,
   mockCreateTransaction,
   mockUpdateTransaction,
@@ -19,6 +38,7 @@ import {
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 const BACKEND_API_KEY = import.meta.env.VITE_BACKEND_API_KEY ?? '';
+const ADMIN_API_KEY = import.meta.env.VITE_ADMIN_API_KEY ?? '';
 
 const jsonHeaders: Record<string, string> = {
   'Content-Type': 'application/json'
@@ -30,6 +50,9 @@ if (BACKEND_API_KEY) {
 
 const authHeaders: Record<string, string> = BACKEND_API_KEY
   ? { 'x-akonta-api-key': BACKEND_API_KEY }
+  : {};
+const adminHeaders: Record<string, string> = ADMIN_API_KEY
+  ? { 'x-akonta-admin-key': ADMIN_API_KEY }
   : {};
 
 let demoModeEnabled = false;
@@ -78,12 +101,40 @@ const fetchJson = async <T>(path: string, init?: RequestInit): Promise<T> => {
   }
 };
 
+const fetchAdminJson = async <T>(path: string, init?: RequestInit): Promise<T> => {
+  const mergedHeaders = new Headers(init?.headers ?? {});
+  for (const [key, value] of Object.entries(adminHeaders)) {
+    if (!mergedHeaders.has(key)) {
+      mergedHeaders.set(key, value);
+    }
+  }
+  return fetchJson<T>(path, {
+    ...init,
+    headers: mergedHeaders
+  });
+};
+
 const fallbackApi = async (path: string, init?: RequestInit) => {
   const method = init?.method?.toUpperCase() || 'GET';
   const body = init?.body ? JSON.parse(init.body as string) : undefined;
 
   if (path === '/api/users' && method === 'POST') {
     return mockCreateUser(body);
+  }
+
+  if (path.match(/^\/api\/users\/[^/]+\/referrals$/) && method === 'GET') {
+    const id = path.split('/')[3] as string;
+    return mockGetReferralProgress(id);
+  }
+
+  if (path.match(/^\/api\/users\/[^/]+\/subscription$/) && method === 'POST') {
+    const id = path.split('/')[3] as string;
+    return mockActivateUserSubscription(id, body);
+  }
+
+  if (path.match(/^\/api\/users\/[^/]+$/) && method === 'PATCH') {
+    const id = path.split('/').pop() as string;
+    return mockUpdateUser(id, body);
   }
 
   if (path.startsWith('/api/transactions') && method === 'GET') {
@@ -168,13 +219,25 @@ const fallbackApi = async (path: string, init?: RequestInit) => {
 
   if (path.startsWith('/api/users/') && method === 'GET') {
     const userId = path.split('/').pop();
-    return users.find((user) => user.id === userId) as User;
+    const user = await mockGetUser(userId ?? '');
+    if (!user) throw new Error('User not found');
+    return user;
   }
 
   if (path === '/api/users' && method === 'GET') {
-    const params = new URLSearchParams(path.split('?')[1]);
-    const id = params.get('id');
-    return users.find((user) => user.id === id) as User;
+    return mockListUsers();
+  }
+
+  if (path === '/api/admin/analytics' && method === 'GET') {
+    return mockGetAdminAnalytics();
+  }
+
+  if (path === '/api/admin/settings/whatsapp-provider' && method === 'GET') {
+    return mockGetAdminWhatsAppProvider();
+  }
+
+  if (path === '/api/admin/settings/whatsapp-provider' && method === 'PATCH') {
+    return mockSetAdminWhatsAppProvider(body.provider);
   }
 
   throw new Error('No mock implementation for ' + method + ' ' + path);
@@ -190,6 +253,37 @@ export const createUser = async (user: Partial<User>): Promise<User> => {
 
 export const getUser = async (id: string): Promise<User> => {
   return fetchJson<User>(`/api/users/${id}`);
+};
+
+export const updateUser = async (
+  id: string,
+  updates: Partial<Pick<User, 'name' | 'businessName' | 'businessType' | 'preferredTime' | 'timezone' | 'currencyCode'>>
+): Promise<User> => {
+  return fetchJson<User>(`/api/users/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify(updates)
+  });
+};
+
+export const getReferralProgress = async (userId: string): Promise<ReferralProgress> => {
+  return fetchJson<ReferralProgress>(`/api/users/${encodeURIComponent(userId)}/referrals`);
+};
+
+export const activateUserSubscription = async (
+  userId: string,
+  payload: {
+    status?: 'free' | 'premium' | 'trial';
+    source?: 'trial' | 'paid' | 'referral_bonus' | 'admin_adjustment';
+    months?: number;
+    note?: string;
+  }
+): Promise<User> => {
+  return fetchJson<User>(`/api/users/${encodeURIComponent(userId)}/subscription`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
+  });
 };
 
 export const getTransactions = async (userId: string): Promise<Transaction[]> => {
@@ -266,6 +360,29 @@ export const getSummaryById = async (id: string) => {
 
 export const getWhatsAppProviderInfo = async (): Promise<{ default: WhatsAppProvider; available: WhatsAppProvider[] }> => {
   return fetchJson<{ default: WhatsAppProvider; available: WhatsAppProvider[] }>('/api/whatsapp/providers');
+};
+
+export const getAdminAnalytics = async (): Promise<AdminAnalytics> => {
+  return fetchAdminJson<AdminAnalytics>('/api/admin/analytics');
+};
+
+export const getAdminWhatsAppProvider = async (): Promise<{ provider: WhatsAppProvider; available: WhatsAppProvider[] }> => {
+  return fetchAdminJson<{ provider: WhatsAppProvider; available: WhatsAppProvider[] }>(
+    '/api/admin/settings/whatsapp-provider'
+  );
+};
+
+export const setAdminWhatsAppProvider = async (
+  provider: WhatsAppProvider
+): Promise<{ provider: WhatsAppProvider; available: WhatsAppProvider[] }> => {
+  return fetchAdminJson<{ provider: WhatsAppProvider; available: WhatsAppProvider[] }>(
+    '/api/admin/settings/whatsapp-provider',
+    {
+      method: 'PATCH',
+      headers: jsonHeaders,
+      body: JSON.stringify({ provider })
+    }
+  );
 };
 
 export const getCurrentBudgets = async (userId: string): Promise<Budget[]> => {

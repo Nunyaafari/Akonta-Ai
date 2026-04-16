@@ -59,6 +59,18 @@ enum WebhookProvider {
   generic
 }
 
+enum WhatsAppProvider {
+  twilio
+  infobip
+}
+
+enum SubscriptionGrantSource {
+  trial
+  paid
+  referral_bonus
+  admin_adjustment
+}
+
 model User {
   id                 String             @id @default(cuid())
   name               String
@@ -67,8 +79,16 @@ model User {
   businessType       String?
   preferredTime      String?
   timezone           String?
+  currencyCode       String             @default("GHS")
   subscriptionStatus SubscriptionStatus @default(free)
   trialEndsAt        DateTime?
+  subscriptionEndsAt DateTime?
+  freeSubscriptionMonthsEarned Int      @default(0)
+  referralCode       String?            @unique
+  referredByUserId   String?
+  referredBy         User?              @relation("UserReferrals", fields: [referredByUserId], references: [id])
+  referrals          User[]             @relation("UserReferrals")
+  isSuperAdmin       Boolean            @default(false)
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
   transactions       Transaction[]
@@ -77,6 +97,10 @@ model User {
   conversationSessions ConversationSession[]
   processedWebhookEvents ProcessedWebhookEvent[]
   customLineItems    CustomLineItem[]
+  referralConversionsAsReferrer ReferralConversion[] @relation("ReferrerConversions")
+  referralConversionAsReferred  ReferralConversion[] @relation("ReferredConversions")
+  referralRewards    ReferralReward[]
+  subscriptionGrants SubscriptionGrant[]
 }
 
 model Transaction {
@@ -174,4 +198,53 @@ model ProcessedWebhookEvent {
   createdAt DateTime        @default(now())
 
   @@unique([provider, eventId])
+}
+
+model ReferralConversion {
+  id             String   @id @default(cuid())
+  referrer       User     @relation("ReferrerConversions", fields: [referrerId], references: [id])
+  referrerId     String
+  referredUser   User     @relation("ReferredConversions", fields: [referredUserId], references: [id])
+  referredUserId String   @unique
+  referralCode   String?
+  qualifiedAt    DateTime @default(now())
+  createdAt      DateTime @default(now())
+
+  @@index([referrerId])
+}
+
+model ReferralReward {
+  id                         String   @id @default(cuid())
+  referrer                   User     @relation(fields: [referrerId], references: [id])
+  referrerId                 String
+  milestone                  Int
+  qualifiedReferralsAtGrant  Int
+  grantedMonths              Int      @default(3)
+  createdAt                  DateTime @default(now())
+
+  @@unique([referrerId, milestone])
+  @@index([referrerId, createdAt])
+}
+
+model SubscriptionGrant {
+  id            String                 @id @default(cuid())
+  user          User                   @relation(fields: [userId], references: [id])
+  userId        String
+  source        SubscriptionGrantSource
+  status        SubscriptionStatus
+  monthsGranted Int                    @default(0)
+  startsAt      DateTime?
+  endsAt        DateTime?
+  note          String?
+  metadata      Json?
+  createdAt     DateTime               @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model AppConfig {
+  id               String           @id @default("global")
+  whatsappProvider WhatsAppProvider @default(twilio)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
 }

@@ -8,6 +8,7 @@ export const config = {
   APP_ORIGIN: process.env.APP_ORIGIN ?? '*',
   OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? '',
   BACKEND_API_KEY: process.env.BACKEND_API_KEY ?? '',
+  ADMIN_API_KEY: process.env.ADMIN_API_KEY ?? '',
   WHATSAPP_PROVIDER: (process.env.WHATSAPP_PROVIDER ?? 'twilio').toLowerCase(),
   TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID ?? '',
   TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN ?? '',

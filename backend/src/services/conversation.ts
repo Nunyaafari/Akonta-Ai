@@ -66,7 +66,9 @@ const parseNoValue = (text: string): boolean => /^(no|none|zero|nil|nothing|skip
 const parseConfirm = (text: string): boolean => /^(save|confirm|yes|y|ok|okay|done)$/i.test(text.trim());
 const parseEdit = (text: string): boolean => /^(edit|change|update|no)$/i.test(text.trim());
 const parseYesResponse = (text: string): boolean => /^(yes|y|ok|okay|confirm|add)$/i.test(text.trim());
-const parseNoResponse = (text: string): boolean => /^(no|n|cancel|back)$/i.test(text.trim());
+const parseNoResponse = (text: string): boolean => /^(no|n)$/i.test(text.trim());
+const parseBack = (text: string): boolean => /^(0|back|previous|prev|menu)$/i.test(text.trim());
+const parseCancel = (text: string): boolean => /^(99|cancel|stop|quit|end)$/i.test(text.trim());
 const formatAmount = (amount: number): string => Number(amount.toFixed(2)).toString();
 const isBackfillYes = (text: string): boolean => parseYesResponse(text) || /^1$/.test(text.trim());
 const isBackfillNo = (text: string): boolean => parseNoResponse(text) || /^2$/.test(text.trim());
@@ -145,7 +147,7 @@ const buildSalesTypePrompt = (prefix?: string, customItems: string[] = []): stri
     ...baseSalesTypeOptions.map((option, index) => `${index + 1}. ${option.label}`),
     ...customItems.map((label, index) => `${baseSalesTypeOptions.length + index + 1}. ${label}`)
   ];
-  return `${header}What type of money inflow was this?\n${lines.join('\n')}\nReply with 1-${lines.length} (or type the name).`;
+  return `${header}What type of money inflow was this?\n${lines.join('\n')}\nReply with 1-${lines.length} (or type the name). You can also reply BACK (0) or CANCEL (99).`;
 };
 
 const buildExpenseTypePrompt = (prefix?: string, customItems: string[] = []): string => {
@@ -154,13 +156,13 @@ const buildExpenseTypePrompt = (prefix?: string, customItems: string[] = []): st
     ...baseExpenseTypeOptions.map((option, index) => `${index + 1}. ${option.label}`),
     ...customItems.map((label, index) => `${baseExpenseTypeOptions.length + index + 1}. ${label}`)
   ];
-  return `${header}What type of expense was it?\n${lines.join('\n')}\nReply with 1-${lines.length} (or type the name).`;
+  return `${header}What type of expense was it?\n${lines.join('\n')}\nReply with 1-${lines.length} (or type the name). You can also reply BACK (0) or CANCEL (99).`;
 };
 
 const buildCustomTypeConfirmPrompt = (
   label: string,
   kind: 'inflow' | 'expense'
-): string => `“${label}” is not in the ${kind} type list. Add it as a new ${kind} line item? Reply YES or NO.`;
+): string => `“${label}” is not in the ${kind} type list. Add it as a new ${kind} line item? Reply YES or NO. (0 = BACK, 99 = CANCEL)`;
 
 const resolveSalesTypeChoice = (
   text: string,
@@ -649,6 +651,66 @@ export const processConversationMessage = async (
   let customInflowItems = await listCustomLineItems(params.userId, 'inflow');
   let customExpenseItems = await listCustomLineItems(params.userId, 'expense');
 
+  if (step !== 'idle' && parseCancel(message)) {
+    step = 'idle';
+    await db.conversationSession.update({
+      where: { id: session.id },
+      data: {
+        step,
+        context: {}
+      }
+    });
+    return finalizeResult({
+      userId: params.userId,
+      botReply: 'No problem. I have cancelled this draft. Send a message when you are ready to log again.',
+      step,
+      touchedTransactions
+    });
+  }
+
+  if (step !== 'idle' && parseBack(message)) {
+    let botReply = '';
+
+    if (step === 'ask_backfill_consent') {
+      context.pendingBackfillDateKey = undefined;
+      context.logDateKey = undefined;
+      step = 'idle';
+      botReply = 'Okay. Back to start. Send a message when you are ready to log today.';
+    } else if (step === 'ask_sales_type' || step === 'confirm_sales_type_custom') {
+      context.pendingSalesTypeLabel = undefined;
+      context.salesTypeConfirmed = false;
+      step = 'ask_sales';
+      botReply = `Back to inflow amount. ${buildInflowQuestionForLogDate(context.logDateKey)} (Reply NO if there was no inflow.)`;
+    } else if (step === 'ask_expense_type' || step === 'confirm_expense_type_custom' || step === 'ask_expense_category') {
+      context.pendingExpenseTypeLabel = undefined;
+      context.expenseTypeConfirmed = false;
+      step = 'ask_expense';
+      botReply = `Back to expense amount. ${buildExpenseQuestionForLogDate(context.logDateKey)}`;
+    } else if (step === 'await_confirm') {
+      context.pendingSalesTypeLabel = undefined;
+      context.pendingExpenseTypeLabel = undefined;
+      context.salesTypeConfirmed = false;
+      context.expenseTypeConfirmed = false;
+      step = 'ask_sales';
+      botReply = `Back to edit mode. ${buildInflowQuestionForLogDate(context.logDateKey)} (Reply NO if there was no inflow.)`;
+    } else {
+      step = 'ask_sales';
+      botReply = `${buildInflowQuestionForLogDate(context.logDateKey)} (Reply NO if there was no inflow.)`;
+    }
+
+    await db.conversationSession.update({
+      where: { id: session.id },
+      data: { step, context: contextToJson(context) }
+    });
+
+    return finalizeResult({
+      userId: params.userId,
+      botReply,
+      step,
+      touchedTransactions
+    });
+  }
+
   if (step === 'idle') {
     const parsed = parseWhatsAppEntry(message);
     const revenue = parsed.find((entry) => entry.type === 'revenue');
@@ -749,7 +811,7 @@ export const processConversationMessage = async (
 
       return finalizeResult({
         userId: params.userId,
-        botReply: `I noted the expense draft. ${buildInflowQuestionForLogDate(context.logDateKey)}`,
+        botReply: `I noted the expense draft. ${buildInflowQuestionForLogDate(context.logDateKey)} Reply NO if there was no inflow.`,
         step,
         touchedTransactions
       });
@@ -823,7 +885,7 @@ export const processConversationMessage = async (
 
     return finalizeResult({
       userId: params.userId,
-      botReply: `Here is your draft record:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm or EDIT to adjust.`,
+      botReply: `Here is your draft record:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`,
       step,
       touchedTransactions
     });
@@ -886,13 +948,156 @@ export const processConversationMessage = async (
   }
 
   if (step === 'ask_sales') {
-    const parsed = parseWhatsAppEntry(message).find((entry) => entry.type === 'revenue');
+    if (parseNoValue(lower)) {
+      context.salesAmount = 0;
+      context.salesEventType = undefined;
+      context.salesTypeConfirmed = true;
+      context.salesCategory = undefined;
+      context.pendingSalesTypeLabel = undefined;
+
+      if (context.expenseAmount === undefined) {
+        step = 'ask_expense';
+        await db.conversationSession.update({
+          where: { id: session.id },
+          data: { step, context: contextToJson(context) }
+        });
+        return finalizeResult({
+          userId: params.userId,
+          botReply: `Inflow recorded as GHS 0. ${buildExpenseQuestionForLogDate(context.logDateKey)}`,
+          step,
+          touchedTransactions
+        });
+      }
+
+      if ((context.expenseAmount ?? 0) > 0 && !context.expenseTypeConfirmed) {
+        step = 'ask_expense_type';
+        await db.conversationSession.update({
+          where: { id: session.id },
+          data: { step, context: contextToJson(context) }
+        });
+        return finalizeResult({
+          userId: params.userId,
+          botReply: buildExpenseTypePrompt(`Inflow recorded as GHS 0. Recorded draft expense: GHS ${context.expenseAmount}.`, customExpenseItems),
+          step,
+          touchedTransactions
+        });
+      }
+
+      if ((context.expenseAmount ?? 0) > 0 && !context.expenseCategory) {
+        step = 'ask_expense_category';
+        await db.conversationSession.update({
+          where: { id: session.id },
+          data: { step, context: contextToJson(context) }
+        });
+        return finalizeResult({
+          userId: params.userId,
+          botReply: `Inflow recorded as GHS 0. Recorded draft expense: GHS ${context.expenseAmount}. What was it spent on?`,
+          step,
+          touchedTransactions
+        });
+      }
+
+      step = 'await_confirm';
+      await db.conversationSession.update({
+        where: { id: session.id },
+        data: { step, context: contextToJson(context) }
+      });
+      return finalizeResult({
+        userId: params.userId,
+        botReply: `Draft summary:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`,
+        step,
+        touchedTransactions
+      });
+    }
+
+    const parsedEntries = parseWhatsAppEntry(message);
+    const parsedRevenue = parsedEntries.find((entry) => entry.type === 'revenue');
+    const parsedExpense = parsedEntries.find((entry) => entry.type === 'expense');
     const explicitSalesEvent = parseSalesEventTypeFromText(message, { allowNumericChoice: false });
-    const salesAmount = parsed?.amount ?? parseAmountFromText(message);
+    const explicitExpenseEvent = parseExpenseEventTypeFromText(message, { allowNumericChoice: false });
+    const shouldTreatAsExpenseFirst = Boolean(
+      (parsedExpense && !parsedRevenue)
+      || (!parsedRevenue && explicitExpenseEvent && !explicitSalesEvent)
+    );
+
+    if (shouldTreatAsExpenseFirst) {
+      const expenseAmount = parsedExpense?.amount ?? parseAmountFromText(message);
+      if (expenseAmount === null || expenseAmount === undefined) {
+        return finalizeResult({
+          userId: params.userId,
+          botReply: `If this is an expense, send amount + label (example: "230 transport"). Otherwise, ${buildInflowQuestionForLogDate(context.logDateKey)}`,
+          step,
+          touchedTransactions
+        });
+      }
+
+      const expenseEventType = explicitExpenseEvent ?? context.expenseEventType ?? 'operating_expense';
+      const expenseCategory = parsedExpense?.category ?? context.expenseCategory ?? defaultExpenseCategory(expenseEventType);
+      const draftExpense = await upsertDraftTransaction({
+        transactionId: context.expenseTransactionId,
+        userId: params.userId,
+        type: 'expense',
+        eventType: expenseEventType,
+        amount: expenseAmount,
+        date: logDate,
+        category: expenseCategory,
+        notes: parsedExpense?.notes
+      });
+
+      touchedTransactions.push(draftExpense);
+      context.expenseTransactionId = draftExpense.id;
+      context.expenseAmount = draftExpense.amount;
+      context.expenseEventType = expenseEventType;
+      context.expenseCategory = draftExpense.category ?? expenseCategory ?? undefined;
+      if (explicitExpenseEvent) context.expenseTypeConfirmed = true;
+      context.pendingExpenseTypeLabel = undefined;
+
+      if (!context.expenseTypeConfirmed) {
+        step = 'ask_expense_type';
+        await db.conversationSession.update({
+          where: { id: session.id },
+          data: { step, context: contextToJson(context) }
+        });
+        return finalizeResult({
+          userId: params.userId,
+          botReply: buildExpenseTypePrompt(`Recorded draft expense: GHS ${draftExpense.amount}.`, customExpenseItems),
+          step,
+          touchedTransactions
+        });
+      }
+
+      if (!context.expenseCategory) {
+        step = 'ask_expense_category';
+        await db.conversationSession.update({
+          where: { id: session.id },
+          data: { step, context: contextToJson(context) }
+        });
+        return finalizeResult({
+          userId: params.userId,
+          botReply: `Recorded expense type as ${humanizeEventType(context.expenseEventType)}. What was it spent on?`,
+          step,
+          touchedTransactions
+        });
+      }
+
+      step = 'ask_sales';
+      await db.conversationSession.update({
+        where: { id: session.id },
+        data: { step, context: contextToJson(context) }
+      });
+      return finalizeResult({
+        userId: params.userId,
+        botReply: `Recorded draft expense: GHS ${draftExpense.amount}. ${buildInflowQuestionForLogDate(context.logDateKey)} Reply NO if there was no inflow.`,
+        step,
+        touchedTransactions
+      });
+    }
+
+    const salesAmount = parsedRevenue?.amount ?? parseAmountFromText(message);
     if (salesAmount === null || salesAmount === undefined) {
       return finalizeResult({
         userId: params.userId,
-        botReply: 'Please send the money inflow amount in cedis so I can save it as draft. Example: "Inflow 850".',
+        botReply: 'Please send the money inflow amount in cedis so I can save it as draft. Example: "Inflow 850". You can also reply NO if there was no inflow.',
         step,
         touchedTransactions
       });
@@ -906,15 +1111,15 @@ export const processConversationMessage = async (
       eventType: salesEventType,
       amount: salesAmount,
       date: logDate,
-      category: parsed?.category ?? context.salesCategory ?? 'Sales',
-      notes: parsed?.notes
+      category: parsedRevenue?.category ?? context.salesCategory ?? 'Sales',
+      notes: parsedRevenue?.notes
     });
 
     touchedTransactions.push(draftRevenue);
     context.salesTransactionId = draftRevenue.id;
     context.salesAmount = draftRevenue.amount;
     context.salesEventType = salesEventType;
-    context.salesCategory = draftRevenue.category ?? parsed?.category ?? 'Sales';
+    context.salesCategory = draftRevenue.category ?? parsedRevenue?.category ?? 'Sales';
     if (explicitSalesEvent) context.salesTypeConfirmed = true;
     context.pendingSalesTypeLabel = undefined;
 
@@ -929,7 +1134,7 @@ export const processConversationMessage = async (
       userId: params.userId,
       botReply: step === 'ask_sales_type'
         ? buildSalesTypePrompt(`Recorded draft inflow: GHS ${draftRevenue.amount}.`, customInflowItems)
-        : `Recorded draft inflow: GHS ${draftRevenue.amount}. ${buildExpenseQuestionForLogDate(context.logDateKey)}`,
+        : `Recorded draft inflow: GHS ${draftRevenue.amount}. ${buildExpenseQuestionForLogDate(context.logDateKey)} (Reply NO if there was no expense.)`,
       step,
       touchedTransactions
     });
@@ -1107,7 +1312,7 @@ export const processConversationMessage = async (
 
       return finalizeResult({
         userId: params.userId,
-        botReply: `Draft summary:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm or EDIT to adjust.`,
+        botReply: `Draft summary:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`,
         step,
         touchedTransactions
       });
@@ -1184,7 +1389,7 @@ export const processConversationMessage = async (
 
     return finalizeResult({
       userId: params.userId,
-      botReply: `Draft summary:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm or EDIT to adjust.`,
+      botReply: `Draft summary:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`,
       step,
       touchedTransactions
     });
@@ -1281,7 +1486,7 @@ export const processConversationMessage = async (
 
     return finalizeResult({
       userId: params.userId,
-      botReply: `Draft summary:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm or EDIT to adjust.`,
+      botReply: `Draft summary:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`,
       step,
       touchedTransactions
     });
@@ -1333,7 +1538,7 @@ export const processConversationMessage = async (
 
       return finalizeResult({
         userId: params.userId,
-        botReply: `Expense type recorded as ${expenseLabel}.\n\nDraft summary:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm or EDIT to adjust.`,
+        botReply: `Expense type recorded as ${expenseLabel}.\n\nDraft summary:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`,
         step,
         touchedTransactions
       });
@@ -1398,7 +1603,7 @@ export const processConversationMessage = async (
 
     return finalizeResult({
       userId: params.userId,
-      botReply: `Draft summary:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm or EDIT to adjust.`,
+      botReply: `Draft summary:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`,
       step,
       touchedTransactions
     });
@@ -1477,7 +1682,7 @@ export const processConversationMessage = async (
 
     return finalizeResult({
       userId: params.userId,
-      botReply: 'Reply SAVE to confirm these draft entries, or EDIT to change them.',
+      botReply: 'Reply SAVE to confirm these draft entries, EDIT to change them, BACK (0) for previous step, or CANCEL (99) to stop.',
       step,
       touchedTransactions
     });

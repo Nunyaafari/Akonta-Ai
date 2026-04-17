@@ -1,8 +1,12 @@
 import type {
   AdminAnalytics,
+  AdminPaymentSettings,
+  AdminWhatsAppSettings,
   Transaction,
   User,
   SummaryPayload,
+  SubscriptionPaymentInitialization,
+  SubscriptionPaymentVerification,
   WhatsAppProvider,
   Budget,
   BudgetStatus,
@@ -20,6 +24,10 @@ import {
   mockGetAdminAnalytics,
   mockGetAdminWhatsAppProvider,
   mockSetAdminWhatsAppProvider,
+  mockGetAdminPaymentSettings,
+  mockSetAdminPaymentSettings,
+  mockInitializeSubscriptionPayment,
+  mockVerifySubscriptionPayment,
   mockGetTransactions,
   mockCreateTransaction,
   mockUpdateTransaction,
@@ -39,6 +47,10 @@ import {
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 const BACKEND_API_KEY = import.meta.env.VITE_BACKEND_API_KEY ?? '';
 const ADMIN_API_KEY = import.meta.env.VITE_ADMIN_API_KEY ?? '';
+const ALLOW_MOCK_FALLBACK = (
+  import.meta.env.VITE_ALLOW_MOCK_FALLBACK
+  ?? (BASE_URL === '' ? 'true' : 'false')
+) === 'true';
 
 const jsonHeaders: Record<string, string> = {
   'Content-Type': 'application/json'
@@ -57,6 +69,22 @@ const adminHeaders: Record<string, string> = ADMIN_API_KEY
 
 let demoModeEnabled = false;
 let demoModeCallback: (() => void) | null = null;
+
+export class OfflineSyncError extends Error {
+  constructor(message = 'Network unavailable') {
+    super(message);
+    this.name = 'OfflineSyncError';
+  }
+}
+
+const isNetworkLayerError = (message: string): boolean =>
+  message.includes('Failed to fetch')
+  || message.includes('NetworkError')
+  || message.includes('Failed to connect')
+  || message.includes('Load failed');
+
+export const isOfflineSyncError = (error: unknown): error is OfflineSyncError =>
+  error instanceof OfflineSyncError;
 
 export const registerDemoModeListener = (callback: () => void) => {
   demoModeCallback = callback;
@@ -78,7 +106,7 @@ const fetchJson = async <T>(path: string, init?: RequestInit): Promise<T> => {
     if (!response.ok) {
       const text = await response.text();
       const isHtml = response.headers.get('content-type')?.includes('text/html');
-      if (BASE_URL === '' || response.status === 404 || isHtml) {
+      if ((BASE_URL === '' || response.status === 404 || isHtml) && ALLOW_MOCK_FALLBACK) {
         if (!demoModeEnabled) {
           demoModeEnabled = true;
           demoModeCallback?.();
@@ -90,7 +118,10 @@ const fetchJson = async <T>(path: string, init?: RequestInit): Promise<T> => {
     return response.json();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (message.includes('Failed to fetch') || message.includes('NetworkError') || message.includes('Failed to connect')) {
+    if (isNetworkLayerError(message)) {
+      if (!ALLOW_MOCK_FALLBACK) {
+        throw new OfflineSyncError(message);
+      }
       if (!demoModeEnabled) {
         demoModeEnabled = true;
         demoModeCallback?.();
@@ -237,7 +268,23 @@ const fallbackApi = async (path: string, init?: RequestInit) => {
   }
 
   if (path === '/api/admin/settings/whatsapp-provider' && method === 'PATCH') {
-    return mockSetAdminWhatsAppProvider(body.provider);
+    return mockSetAdminWhatsAppProvider(body);
+  }
+
+  if (path === '/api/admin/settings/payment' && method === 'GET') {
+    return mockGetAdminPaymentSettings();
+  }
+
+  if (path === '/api/admin/settings/payment' && method === 'PATCH') {
+    return mockSetAdminPaymentSettings(body);
+  }
+
+  if (path === '/api/subscriptions/initialize' && method === 'POST') {
+    return mockInitializeSubscriptionPayment(body);
+  }
+
+  if (path === '/api/subscriptions/verify' && method === 'POST') {
+    return mockVerifySubscriptionPayment(body);
   }
 
   throw new Error('No mock implementation for ' + method + ' ' + path);
@@ -366,23 +413,61 @@ export const getAdminAnalytics = async (): Promise<AdminAnalytics> => {
   return fetchAdminJson<AdminAnalytics>('/api/admin/analytics');
 };
 
-export const getAdminWhatsAppProvider = async (): Promise<{ provider: WhatsAppProvider; available: WhatsAppProvider[] }> => {
-  return fetchAdminJson<{ provider: WhatsAppProvider; available: WhatsAppProvider[] }>(
+export const getAdminWhatsAppProvider = async (): Promise<AdminWhatsAppSettings> => {
+  return fetchAdminJson<AdminWhatsAppSettings>(
     '/api/admin/settings/whatsapp-provider'
   );
 };
 
 export const setAdminWhatsAppProvider = async (
-  provider: WhatsAppProvider
-): Promise<{ provider: WhatsAppProvider; available: WhatsAppProvider[] }> => {
-  return fetchAdminJson<{ provider: WhatsAppProvider; available: WhatsAppProvider[] }>(
+  payload: {
+    provider?: WhatsAppProvider;
+    whatchimp?: Partial<AdminWhatsAppSettings['whatchimp']>;
+  }
+): Promise<AdminWhatsAppSettings> => {
+  return fetchAdminJson<AdminWhatsAppSettings>(
     '/api/admin/settings/whatsapp-provider',
     {
       method: 'PATCH',
       headers: jsonHeaders,
-      body: JSON.stringify({ provider })
+      body: JSON.stringify(payload)
     }
   );
+};
+
+export const getAdminPaymentSettings = async (): Promise<AdminPaymentSettings> => {
+  return fetchAdminJson<AdminPaymentSettings>('/api/admin/settings/payment');
+};
+
+export const setAdminPaymentSettings = async (
+  payload: Partial<AdminPaymentSettings>
+): Promise<AdminPaymentSettings> => {
+  return fetchAdminJson<AdminPaymentSettings>('/api/admin/settings/payment', {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
+  });
+};
+
+export const initializeSubscriptionPayment = async (payload: {
+  userId: string;
+  months?: number;
+  callbackUrl?: string;
+  customerEmail?: string;
+}): Promise<SubscriptionPaymentInitialization> => {
+  return fetchJson<SubscriptionPaymentInitialization>('/api/subscriptions/initialize', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
+  });
+};
+
+export const verifySubscriptionPayment = async (reference: string): Promise<SubscriptionPaymentVerification> => {
+  return fetchJson<SubscriptionPaymentVerification>('/api/subscriptions/verify', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ reference })
+  });
 };
 
 export const getCurrentBudgets = async (userId: string): Promise<Budget[]> => {

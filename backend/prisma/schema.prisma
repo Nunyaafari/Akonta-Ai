@@ -62,6 +62,7 @@ enum WebhookProvider {
 enum WhatsAppProvider {
   twilio
   infobip
+  whatchimp
 }
 
 enum SubscriptionGrantSource {
@@ -69,6 +70,16 @@ enum SubscriptionGrantSource {
   paid
   referral_bonus
   admin_adjustment
+}
+
+enum SubscriptionPaymentProvider {
+  paystack
+}
+
+enum SubscriptionPaymentStatus {
+  pending
+  successful
+  failed
 }
 
 model User {
@@ -101,6 +112,7 @@ model User {
   referralConversionAsReferred  ReferralConversion[] @relation("ReferredConversions")
   referralRewards    ReferralReward[]
   subscriptionGrants SubscriptionGrant[]
+  subscriptionPayments SubscriptionPayment[]
 }
 
 model Transaction {
@@ -242,9 +254,40 @@ model SubscriptionGrant {
   @@index([userId, createdAt])
 }
 
+model SubscriptionPayment {
+  id             String                      @id @default(cuid())
+  user           User                        @relation(fields: [userId], references: [id])
+  userId         String
+  provider       SubscriptionPaymentProvider @default(paystack)
+  reference      String                      @unique
+  amountMinor    Int
+  currencyCode   String                      @default("GHS")
+  monthsPurchased Int                        @default(1)
+  status         SubscriptionPaymentStatus   @default(pending)
+  paidAt         DateTime?
+  channel        String?
+  customerEmail  String?
+  metadata       Json?
+  createdAt      DateTime                    @default(now())
+  updatedAt      DateTime                    @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+}
+
 model AppConfig {
   id               String           @id @default("global")
-  whatsappProvider WhatsAppProvider @default(twilio)
+  whatsappProvider WhatsAppProvider @default(whatchimp)
+  paystackPublicKey String?
+  paystackSecretKey String?
+  paystackWebhookSecret String?
+  paystackPremiumAmount Int         @default(50)
+  paystackCurrencyCode String       @default("GHS")
+  whatchimpBaseUrl String?
+  whatchimpApiKey String?
+  whatchimpSenderId String?
+  whatchimpSendPath String          @default("/api/messages/whatsapp")
+  whatchimpAuthScheme String        @default("Bearer")
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
 }

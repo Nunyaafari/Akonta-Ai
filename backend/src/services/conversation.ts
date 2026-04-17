@@ -63,8 +63,8 @@ const parseAmountFromText = (text: string): number | null => {
 };
 
 const parseNoValue = (text: string): boolean => /^(no|none|zero|nil|nothing|skip)$/i.test(text.trim());
-const parseConfirm = (text: string): boolean => /^(save|confirm|yes|y|ok|okay|done)$/i.test(text.trim());
-const parseEdit = (text: string): boolean => /^(edit|change|update|no)$/i.test(text.trim());
+const parseConfirm = (text: string): boolean => /^(1|save|confirm|yes|y|ok|okay|done)$/i.test(text.trim());
+const parseEdit = (text: string): boolean => /^(2|edit|change|update|no)$/i.test(text.trim());
 const parseYesResponse = (text: string): boolean => /^(yes|y|ok|okay|confirm|add)$/i.test(text.trim());
 const parseNoResponse = (text: string): boolean => /^(no|n)$/i.test(text.trim());
 const parseBack = (text: string): boolean => /^(0|back|previous|prev|menu)$/i.test(text.trim());
@@ -124,11 +124,11 @@ const baseSalesTypeOptions = [
 ] as const;
 
 const baseExpenseTypeOptions = [
-  { label: 'Operating expense', eventType: 'operating_expense' },
-  { label: 'Stock purchase', eventType: 'stock_purchase' },
-  { label: 'Owner withdrawal', eventType: 'owner_withdrawal' },
-  { label: 'Loan repayment', eventType: 'loan_repayment' },
-  { label: 'Supplier credit', eventType: 'supplier_credit' }
+  { label: 'Stock purchase (Direct)', eventType: 'stock_purchase' },
+  { label: 'Supplier credit (Direct, non-cash)', eventType: 'supplier_credit' },
+  { label: 'Operating expense (Indirect)', eventType: 'operating_expense' },
+  { label: 'Owner withdrawal (Non-business)', eventType: 'owner_withdrawal' },
+  { label: 'Loan repayment (Non-business)', eventType: 'loan_repayment' }
 ] as const;
 
 const normalizeCustomLineItemLabel = (label: string): string => label.trim().replace(/\s+/g, ' ').slice(0, 80);
@@ -156,13 +156,22 @@ const buildExpenseTypePrompt = (prefix?: string, customItems: string[] = []): st
     ...baseExpenseTypeOptions.map((option, index) => `${index + 1}. ${option.label}`),
     ...customItems.map((label, index) => `${baseExpenseTypeOptions.length + index + 1}. ${label}`)
   ];
-  return `${header}What type of expense was it?\n${lines.join('\n')}\nReply with 1-${lines.length} (or type the name). You can also reply BACK (0) or CANCEL (99).`;
+  return `${header}What type of expense was it? (This drives Direct vs Indirect in your reports.)\n${lines.join('\n')}\nReply with 1-${lines.length} (or type the name). You can also reply BACK (0) or CANCEL (99).`;
 };
 
 const buildCustomTypeConfirmPrompt = (
   label: string,
   kind: 'inflow' | 'expense'
 ): string => `“${label}” is not in the ${kind} type list. Add it as a new ${kind} line item? Reply YES or NO. (0 = BACK, 99 = CANCEL)`;
+
+const buildAwaitConfirmPrompt = (): string =>
+  'Reply with:\n1. SAVE (confirm)\n2. EDIT (adjust)\n0. BACK (previous step)\n99. CANCEL (stop)';
+
+const salesCategoryForCurrentDraft = (context: ConversationContext): string | undefined =>
+  context.salesTransactionId ? context.salesCategory : undefined;
+
+const expenseCategoryForCurrentDraft = (context: ConversationContext): string | undefined =>
+  context.expenseTransactionId ? context.expenseCategory : undefined;
 
 const resolveSalesTypeChoice = (
   text: string,
@@ -329,11 +338,11 @@ const parseExpenseEventTypeFromText = (
     const numericMatch = value.match(/^(?:option\s*)?\(?([1-5])\)?[.)]?\s*$/i);
     if (numericMatch) {
       const fromNumeric: Record<string, ParsedTransaction['eventType']> = {
-        '1': 'operating_expense',
-        '2': 'stock_purchase',
-        '3': 'owner_withdrawal',
-        '4': 'loan_repayment',
-        '5': 'supplier_credit'
+        '1': 'stock_purchase',
+        '2': 'supplier_credit',
+        '3': 'operating_expense',
+        '4': 'owner_withdrawal',
+        '5': 'loan_repayment'
       };
       return fromNumeric[numericMatch[1]];
     }
@@ -373,6 +382,17 @@ const defaultExpenseCategory = (eventType?: ParsedTransaction['eventType']): str
   if (eventType === 'stock_purchase') return 'Stock purchase';
   if (eventType === 'supplier_credit') return 'Supplier credit';
   if (eventType === 'loan_repayment') return 'Loan repayment';
+  return undefined;
+};
+
+const defaultRevenueCategory = (eventType?: ParsedTransaction['eventType']): string | undefined => {
+  if (!eventType) return undefined;
+  if (eventType === 'cash_sale') return 'Cash sale';
+  if (eventType === 'momo_sale') return 'MoMo sale';
+  if (eventType === 'credit_sale') return 'Credit sale';
+  if (eventType === 'debtor_recovery') return 'Debtor recovery';
+  if (eventType === 'capital_introduced') return 'Capital introduced';
+  if (eventType === 'loan_received') return 'Loan received';
   return undefined;
 };
 
@@ -767,14 +787,20 @@ export const processConversationMessage = async (
         eventType: salesEventType,
         amount: revenue.amount,
         date: logDate,
-        category: revenue.category ?? context.salesCategory ?? 'Sales',
+        category: revenue.category
+          ?? salesCategoryForCurrentDraft(context)
+          ?? defaultRevenueCategory(salesEventType)
+          ?? 'Cash sale',
         notes: revenue.notes
       });
       touchedTransactions.push(draftRevenue);
       context.salesTransactionId = draftRevenue.id;
       context.salesAmount = draftRevenue.amount;
       context.salesEventType = salesEventType;
-      context.salesCategory = draftRevenue.category ?? revenue.category ?? 'Sales';
+      context.salesCategory = draftRevenue.category
+        ?? revenue.category
+        ?? defaultRevenueCategory(salesEventType)
+        ?? 'Cash sale';
       if (explicitSalesEvent) context.salesTypeConfirmed = true;
       context.pendingSalesTypeLabel = undefined;
     }
@@ -885,7 +911,7 @@ export const processConversationMessage = async (
 
     return finalizeResult({
       userId: params.userId,
-      botReply: `Here is your draft record:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`,
+      botReply: `Here is your draft record:\n${buildDraftSummary(context)}\n\n${buildAwaitConfirmPrompt()}`,
       step,
       touchedTransactions
     });
@@ -1004,7 +1030,7 @@ export const processConversationMessage = async (
       });
       return finalizeResult({
         userId: params.userId,
-        botReply: `Draft summary:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`,
+        botReply: `Draft summary:\n${buildDraftSummary(context)}\n\n${buildAwaitConfirmPrompt()}`,
         step,
         touchedTransactions
       });
@@ -1032,7 +1058,9 @@ export const processConversationMessage = async (
       }
 
       const expenseEventType = explicitExpenseEvent ?? context.expenseEventType ?? 'operating_expense';
-      const expenseCategory = parsedExpense?.category ?? context.expenseCategory ?? defaultExpenseCategory(expenseEventType);
+      const expenseCategory = parsedExpense?.category
+        ?? expenseCategoryForCurrentDraft(context)
+        ?? defaultExpenseCategory(expenseEventType);
       const draftExpense = await upsertDraftTransaction({
         transactionId: context.expenseTransactionId,
         userId: params.userId,
@@ -1111,7 +1139,10 @@ export const processConversationMessage = async (
       eventType: salesEventType,
       amount: salesAmount,
       date: logDate,
-      category: parsedRevenue?.category ?? context.salesCategory ?? 'Sales',
+      category: parsedRevenue?.category
+        ?? salesCategoryForCurrentDraft(context)
+        ?? defaultRevenueCategory(salesEventType)
+        ?? 'Cash sale',
       notes: parsedRevenue?.notes
     });
 
@@ -1119,7 +1150,10 @@ export const processConversationMessage = async (
     context.salesTransactionId = draftRevenue.id;
     context.salesAmount = draftRevenue.amount;
     context.salesEventType = salesEventType;
-    context.salesCategory = draftRevenue.category ?? parsedRevenue?.category ?? 'Sales';
+    context.salesCategory = draftRevenue.category
+      ?? parsedRevenue?.category
+      ?? defaultRevenueCategory(salesEventType)
+      ?? 'Cash sale';
     if (explicitSalesEvent) context.salesTypeConfirmed = true;
     context.pendingSalesTypeLabel = undefined;
 
@@ -1182,7 +1216,9 @@ export const processConversationMessage = async (
     }
 
     const inflowTypeLabel = salesChoice.customLabel ?? humanizeEventType(salesChoice.eventType) ?? 'Other';
-    const inflowCategory = salesChoice.eventType === 'other' ? salesChoice.customLabel ?? context.salesCategory ?? 'Other' : 'Sales';
+    const inflowCategory = salesChoice.eventType === 'other'
+      ? salesChoice.customLabel ?? salesCategoryForCurrentDraft(context) ?? 'Other'
+      : defaultRevenueCategory(salesChoice.eventType) ?? 'Cash sale';
 
     if (context.salesTransactionId) {
       const updated = await db.transaction.update({
@@ -1312,7 +1348,7 @@ export const processConversationMessage = async (
 
       return finalizeResult({
         userId: params.userId,
-        botReply: `Draft summary:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`,
+        botReply: `Draft summary:\n${buildDraftSummary(context)}\n\n${buildAwaitConfirmPrompt()}`,
         step,
         touchedTransactions
       });
@@ -1331,7 +1367,9 @@ export const processConversationMessage = async (
     }
 
     const expenseEventType = explicitExpenseEvent ?? context.expenseEventType ?? 'operating_expense';
-    const expenseCategory = parsed?.category ?? context.expenseCategory ?? defaultExpenseCategory(expenseEventType);
+    const expenseCategory = parsed?.category
+      ?? expenseCategoryForCurrentDraft(context)
+      ?? defaultExpenseCategory(expenseEventType);
     const draftExpense = await upsertDraftTransaction({
       transactionId: context.expenseTransactionId,
       userId: params.userId,
@@ -1389,7 +1427,7 @@ export const processConversationMessage = async (
 
     return finalizeResult({
       userId: params.userId,
-      botReply: `Draft summary:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`,
+      botReply: `Draft summary:\n${buildDraftSummary(context)}\n\n${buildAwaitConfirmPrompt()}`,
       step,
       touchedTransactions
     });
@@ -1486,7 +1524,7 @@ export const processConversationMessage = async (
 
     return finalizeResult({
       userId: params.userId,
-      botReply: `Draft summary:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`,
+      botReply: `Draft summary:\n${buildDraftSummary(context)}\n\n${buildAwaitConfirmPrompt()}`,
       step,
       touchedTransactions
     });
@@ -1538,7 +1576,7 @@ export const processConversationMessage = async (
 
       return finalizeResult({
         userId: params.userId,
-        botReply: `Expense type recorded as ${expenseLabel}.\n\nDraft summary:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`,
+        botReply: `Expense type recorded as ${expenseLabel}.\n\nDraft summary:\n${buildDraftSummary(context)}\n\n${buildAwaitConfirmPrompt()}`,
         step,
         touchedTransactions
       });
@@ -1603,7 +1641,7 @@ export const processConversationMessage = async (
 
     return finalizeResult({
       userId: params.userId,
-      botReply: `Draft summary:\n${buildDraftSummary(context)}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`,
+      botReply: `Draft summary:\n${buildDraftSummary(context)}\n\n${buildAwaitConfirmPrompt()}`,
       step,
       touchedTransactions
     });
@@ -1682,7 +1720,7 @@ export const processConversationMessage = async (
 
     return finalizeResult({
       userId: params.userId,
-      botReply: 'Reply SAVE to confirm these draft entries, EDIT to change them, BACK (0) for previous step, or CANCEL (99) to stop.',
+      botReply: buildAwaitConfirmPrompt(),
       step,
       touchedTransactions
     });

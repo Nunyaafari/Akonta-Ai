@@ -9,6 +9,13 @@ export interface BudgetStatus {
   status: 'onTrack' | 'nearTarget' | 'overBudget';
 }
 
+const isBusinessExpense = (transaction: Transaction): boolean => {
+  if (transaction.type !== 'expense') return false;
+  if (transaction.eventType === 'owner_withdrawal' || transaction.eventType === 'loan_repayment') return false;
+  const category = (transaction.category ?? '').toLowerCase();
+  return !/(owner|drawing|personal|private|family|loan repayment|repayment|withdraw)/i.test(category);
+};
+
 const normalizeMonthPeriod = (year: number, month: number) => {
   const start = new Date(Date.UTC(year, month - 1, 1));
   const end = new Date(Date.UTC(year, month, 1));
@@ -92,7 +99,10 @@ export const computeBudgetStatus = (
   transactions: Transaction[]
 ): BudgetStatus => {
   const used = transactions
-    .filter((tx) => tx.type === budget.targetType)
+    .filter((tx) => {
+      if (budget.targetType === 'revenue') return tx.type === 'revenue';
+      return isBusinessExpense(tx);
+    })
     .filter((tx) => tx.status === 'confirmed' && tx.correctionOfId === null)
     .reduce((sum, tx) => sum + tx.amount, 0);
 

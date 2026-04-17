@@ -52,6 +52,7 @@ export interface ChatMessage {
   type: 'bot' | 'user';
   content: string;
   timestamp: Date;
+  syncStatus?: 'pending' | 'synced' | 'failed';
   parsed?: {
     revenue?: number;
     expense?: number;
@@ -91,10 +92,26 @@ export interface MonthlySummary {
 export interface SummaryPayload {
   totalRevenue: number;
   totalExpenses: number;
+  directExpenses: number;
+  indirectExpenses: number;
+  nonBusinessExpenses: number;
+  grossProfit: number;
+  netProfit: number;
   profit: number;
   transactionCount: number;
   categoryBreakdown: Record<string, { revenue: number; expense: number; total: number }>;
+  directExpenseBreakdown: Record<string, number>;
+  indirectExpenseBreakdown: Record<string, number>;
   dailyBreakdown: Array<{ date: string; revenue: number; expenses: number }>;
+  cashFlow: {
+    operatingInflow: number;
+    operatingOutflow: number;
+    financingInflow: number;
+    financingOutflow: number;
+    totalCashInflow: number;
+    totalCashOutflow: number;
+    netCashFlow: number;
+  };
 }
 
 export type BudgetTargetType = 'expense' | 'revenue';
@@ -175,7 +192,44 @@ export interface MonthlyInsights {
   highlights: string[];
 }
 
-export type WhatsAppProvider = 'twilio' | 'infobip';
+export type WhatsAppProvider = 'twilio' | 'infobip' | 'whatchimp';
+
+export interface AdminWhatsAppSettings {
+  provider: WhatsAppProvider;
+  available: WhatsAppProvider[];
+  whatchimp: {
+    baseUrl: string;
+    apiKey: string;
+    senderId: string;
+    sendPath: string;
+    authScheme: string;
+  };
+}
+
+export interface AdminPaymentSettings {
+  paystackPublicKey: string;
+  paystackSecretKey: string;
+  paystackWebhookSecret: string;
+  premiumAmount: number;
+  currencyCode: string;
+}
+
+export interface SubscriptionPaymentInitialization {
+  reference: string;
+  authorizationUrl: string;
+  accessCode: string;
+  amountMinor: number;
+  amountMajor: number;
+  currencyCode: string;
+  months: number;
+  publicKey: string | null;
+}
+
+export interface SubscriptionPaymentVerification {
+  status: string;
+  applied: boolean;
+  user: User | null;
+}
 
 export interface ReferralProgress {
   referralCode: string;
@@ -213,6 +267,11 @@ export interface AdminAnalytics {
   };
   subscriptions: {
     paidStarts: number;
+    daily: Array<{
+      date: string;
+      count: number;
+      revenue: number;
+    }>;
   };
   referrals: {
     qualifiedConversions: number;

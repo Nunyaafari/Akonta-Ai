@@ -1,18 +1,23 @@
 import type {
   AdminAnalytics,
+  AdminPaymentSettings,
+  AdminWhatsAppSettings,
   Budget,
   BudgetStatus,
   BudgetTargetType,
   ReferralProgress,
   SummaryPayload,
+  SubscriptionPaymentInitialization,
+  SubscriptionPaymentVerification,
   Transaction,
   User,
   WhatsAppProvider
 } from '../types';
-import { currentWeekSummary, currentMonthSummary, mockTransactions } from '../data/mockData';
+import { mockTransactions } from '../data/mockData';
 
-const REFERRAL_MILESTONE_SIZE = 5;
-const REFERRAL_REWARD_MONTHS = 3;
+const REFERRAL_MILESTONE_SIZE = 3;
+const REFERRAL_REWARD_MONTHS = 1;
+const INITIAL_TRIAL_MONTHS = 1;
 
 const parseMessageToTransactions = (userId: string, message: string): Transaction[] => {
   const text = message.toLowerCase().trim();
@@ -99,29 +104,84 @@ const parseMessageToTransactions = (userId: string, message: string): Transactio
 };
 
 const createSummary = (transactions: Transaction[]): SummaryPayload => {
+  type ExpenseClass = 'direct' | 'indirect' | 'non_business';
+  const resolveRevenueCategory = (tx: Transaction): string => {
+    if (tx.eventType === 'cash_sale') return tx.category ?? 'Cash sale';
+    if (tx.eventType === 'momo_sale') return 'MoMo sale';
+    if (tx.eventType === 'credit_sale') return 'Credit sale';
+    if (tx.eventType === 'debtor_recovery') return 'Debtor recovery';
+    if (tx.eventType === 'capital_introduced') return 'Capital introduced';
+    if (tx.eventType === 'loan_received') return 'Loan received';
+    return tx.category ?? 'Uncategorized';
+  };
+  const resolveExpenseClass = (tx: Transaction): ExpenseClass => {
+    const category = (tx.category ?? '').toLowerCase();
+    if (tx.eventType === 'stock_purchase' || tx.eventType === 'supplier_credit') return 'direct';
+    if (tx.eventType === 'operating_expense') return 'indirect';
+    if (tx.eventType === 'owner_withdrawal' || tx.eventType === 'loan_repayment') return 'non_business';
+    if (/(stock|inventory|raw material|materials|cost of sales|cost of goods|purchase|purchases|supplier)/i.test(category)) return 'direct';
+    if (/(owner|drawing|personal|private|family|loan repayment|repayment|withdraw)/i.test(category)) return 'non_business';
+    return 'indirect';
+  };
+
   const revenueTxs = transactions.filter((tx) => tx.type === 'revenue');
-  const expenseTxs = transactions.filter((tx) => tx.type === 'expense');
   const totalRevenue = revenueTxs.reduce((sum, tx) => sum + tx.amount, 0);
-  const totalExpenses = expenseTxs.reduce((sum, tx) => sum + tx.amount, 0);
-  const profit = totalRevenue - totalExpenses;
+  let directExpenses = 0;
+  let indirectExpenses = 0;
+  let nonBusinessExpenses = 0;
   const transactionCount = transactions.length;
 
   const categoryBreakdown: Record<string, { revenue: number; expense: number; total: number }> = {};
+  const directExpenseBreakdown: Record<string, number> = {};
+  const indirectExpenseBreakdown: Record<string, number> = {};
   const dailyBreakdown: Array<{ date: string; revenue: number; expenses: number }> = [];
 
   const dailyMap: Record<string, { revenue: number; expenses: number }> = {};
+  const cashFlow = {
+    operatingInflow: 0,
+    operatingOutflow: 0,
+    financingInflow: 0,
+    financingOutflow: 0,
+    totalCashInflow: 0,
+    totalCashOutflow: 0,
+    netCashFlow: 0
+  };
 
   for (const tx of transactions) {
-    const category = tx.category ?? 'Uncategorized';
+    const category = tx.type === 'revenue'
+      ? resolveRevenueCategory(tx)
+      : (tx.category ?? 'Uncategorized');
     if (!categoryBreakdown[category]) {
       categoryBreakdown[category] = { revenue: 0, expense: 0, total: 0 };
     }
     if (tx.type === 'revenue') {
       categoryBreakdown[category].revenue += tx.amount;
       categoryBreakdown[category].total += tx.amount;
+      if (tx.eventType === 'capital_introduced' || tx.eventType === 'loan_received') {
+        cashFlow.financingInflow += tx.amount;
+      } else if (tx.eventType !== 'credit_sale') {
+        cashFlow.operatingInflow += tx.amount;
+      }
     } else {
       categoryBreakdown[category].expense += tx.amount;
       categoryBreakdown[category].total -= tx.amount;
+
+      const expenseClass = resolveExpenseClass(tx);
+      if (expenseClass === 'direct') {
+        directExpenses += tx.amount;
+        directExpenseBreakdown[category] = (directExpenseBreakdown[category] ?? 0) + tx.amount;
+      } else if (expenseClass === 'indirect') {
+        indirectExpenses += tx.amount;
+        indirectExpenseBreakdown[category] = (indirectExpenseBreakdown[category] ?? 0) + tx.amount;
+      } else {
+        nonBusinessExpenses += tx.amount;
+      }
+
+      if (tx.eventType === 'owner_withdrawal' || tx.eventType === 'loan_repayment') {
+        cashFlow.financingOutflow += tx.amount;
+      } else if (tx.eventType !== 'supplier_credit') {
+        cashFlow.operatingOutflow += tx.amount;
+      }
     }
 
     const dateKey = tx.date instanceof Date ? tx.date.toISOString().slice(0, 10) : new Date(tx.date).toISOString().slice(0, 10);
@@ -131,7 +191,10 @@ const createSummary = (transactions: Transaction[]): SummaryPayload => {
     if (tx.type === 'revenue') {
       dailyMap[dateKey].revenue += tx.amount;
     } else {
-      dailyMap[dateKey].expenses += tx.amount;
+      const expenseClass = resolveExpenseClass(tx);
+      if (expenseClass !== 'non_business') {
+        dailyMap[dateKey].expenses += tx.amount;
+      }
     }
   }
 
@@ -139,7 +202,42 @@ const createSummary = (transactions: Transaction[]): SummaryPayload => {
     .sort(([a], [b]) => a.localeCompare(b))
     .forEach(([date, values]) => dailyBreakdown.push({ date, revenue: values.revenue, expenses: values.expenses }));
 
-  return { totalRevenue, totalExpenses, profit, transactionCount, categoryBreakdown, dailyBreakdown };
+  cashFlow.totalCashInflow = cashFlow.operatingInflow + cashFlow.financingInflow;
+  cashFlow.totalCashOutflow = cashFlow.operatingOutflow + cashFlow.financingOutflow;
+  cashFlow.netCashFlow = cashFlow.totalCashInflow - cashFlow.totalCashOutflow;
+
+  const totalExpenses = directExpenses + indirectExpenses;
+  const grossProfit = totalRevenue - directExpenses;
+  const netProfit = grossProfit - indirectExpenses;
+
+  return {
+    totalRevenue,
+    totalExpenses,
+    directExpenses,
+    indirectExpenses,
+    nonBusinessExpenses,
+    grossProfit,
+    netProfit,
+    profit: netProfit,
+    transactionCount,
+    categoryBreakdown,
+    directExpenseBreakdown,
+    indirectExpenseBreakdown,
+    dailyBreakdown,
+    cashFlow
+  };
+};
+
+const isBusinessExpenseTx = (tx: Transaction): boolean => {
+  if (tx.type !== 'expense') return false;
+  if (tx.eventType === 'owner_withdrawal' || tx.eventType === 'loan_repayment') return false;
+  const category = (tx.category ?? '').toLowerCase();
+  return !/(owner|drawing|personal|private|family|loan repayment|repayment|withdraw)/i.test(category);
+};
+
+const matchesBudgetTarget = (tx: Transaction, targetType: BudgetTargetType): boolean => {
+  if (targetType === 'revenue') return tx.type === 'revenue';
+  return isBusinessExpenseTx(tx);
 };
 
 const users: User[] = [];
@@ -199,15 +297,36 @@ const customLineItemsByUser: Record<
 > = {};
 
 const defaultProviderInfo = {
-  default: 'twilio' as WhatsAppProvider,
-  available: ['twilio', 'infobip'] as WhatsAppProvider[]
+  default: 'whatchimp' as WhatsAppProvider,
+  available: ['whatchimp', 'twilio', 'infobip'] as WhatsAppProvider[]
 };
 let activeProvider = defaultProviderInfo.default;
 
-const normalizeMonthStart = (date: Date): string => {
-  const utc = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
-  return utc.toISOString();
+let mockWhatchimpSettings: AdminWhatsAppSettings['whatchimp'] = {
+  baseUrl: 'https://api.whatchimp.com',
+  apiKey: '',
+  senderId: '',
+  sendPath: '/api/messages/whatsapp',
+  authScheme: 'Bearer'
 };
+
+let mockPaystackSettings: AdminPaymentSettings = {
+  paystackPublicKey: '',
+  paystackSecretKey: '',
+  paystackWebhookSecret: '',
+  premiumAmount: 50,
+  currencyCode: 'GHS'
+};
+
+const subscriptionPayments: Array<{
+  id: string;
+  reference: string;
+  userId: string;
+  amountMinor: number;
+  currencyCode: string;
+  status: 'pending' | 'successful' | 'failed';
+  createdAt: string;
+}> = [];
 
 const createTransactionId = () => `tx-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const createReferralCode = (seed?: string) => {
@@ -226,9 +345,16 @@ const parseDateInput = (value?: string): Date => {
   return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
 };
 
+const parsePositiveInt = (value: unknown, fallback = 1): number => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  const normalized = Math.floor(parsed);
+  return normalized > 0 ? normalized : fallback;
+};
+
 const ensureReferralQualification = (userId: string) => {
   const user = users.find((entry) => entry.id === userId);
-  if (!user || user.subscriptionStatus !== 'premium' || !user.referredByUserId) return;
+  if (!user || !user.referredByUserId) return;
 
   const referrerId = user.referredByUserId;
   const existing = referralConversionsByReferrer[referrerId] ?? [];
@@ -278,8 +404,8 @@ export const mockCreateUser = async (body: Partial<User>): Promise<User> => {
     referralCode = createReferralCode(body.name);
   }
 
-  const trialEndsAt = new Date(createdAt);
-  trialEndsAt.setUTCDate(trialEndsAt.getUTCDate() + 7);
+  const trialEndsAt = addMonthsUtc(createdAt, INITIAL_TRIAL_MONTHS);
+  const defaultSubscriptionStatus = body.subscriptionStatus ?? 'trial';
   const user: User = {
     id,
     name: body.name ?? 'Demo User',
@@ -289,9 +415,9 @@ export const mockCreateUser = async (body: Partial<User>): Promise<User> => {
     preferredTime: body.preferredTime ?? 'evening',
     timezone: body.timezone ?? 'Africa/Accra',
     currencyCode: body.currencyCode ?? 'GHS',
-    subscriptionStatus: body.subscriptionStatus ?? 'trial',
-    trialEndsAt: body.subscriptionStatus === 'trial' || !body.subscriptionStatus ? trialEndsAt : undefined,
-    subscriptionEndsAt: body.subscriptionEndsAt ?? null,
+    subscriptionStatus: defaultSubscriptionStatus,
+    trialEndsAt: defaultSubscriptionStatus === 'trial' ? trialEndsAt : undefined,
+    subscriptionEndsAt: body.subscriptionEndsAt ?? (defaultSubscriptionStatus === 'trial' ? trialEndsAt : null),
     freeSubscriptionMonthsEarned: body.freeSubscriptionMonthsEarned ?? 0,
     referralCode,
     referredByUserId,
@@ -341,8 +467,7 @@ export const mockActivateUserSubscription = async (id: string, payload: {
     user.trialEndsAt = undefined;
     ensureReferralQualification(id);
   } else if (nextStatus === 'trial') {
-    const trialEnd = new Date();
-    trialEnd.setUTCDate(trialEnd.getUTCDate() + 7);
+    const trialEnd = addMonthsUtc(new Date(), INITIAL_TRIAL_MONTHS);
     user.trialEndsAt = trialEnd;
     user.subscriptionEndsAt = trialEnd;
   } else {
@@ -554,7 +679,7 @@ export const mockGetMonthlyInsights = async (userId: string, year: number, month
   });
 
   const revenue = inRange.filter((tx) => tx.type === 'revenue').reduce((sum, tx) => sum + tx.amount, 0);
-  const expenses = inRange.filter((tx) => tx.type === 'expense').reduce((sum, tx) => sum + tx.amount, 0);
+  const expenses = inRange.filter((tx) => isBusinessExpenseTx(tx)).reduce((sum, tx) => sum + tx.amount, 0);
   const profit = revenue - expenses;
 
   const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
@@ -569,7 +694,7 @@ export const mockGetMonthlyInsights = async (userId: string, year: number, month
   const expenseGap = expectedExpense !== undefined ? expenses - expectedExpense : undefined;
 
   const categoryTotals = inRange
-    .filter((tx) => tx.type === 'expense')
+    .filter((tx) => isBusinessExpenseTx(tx))
     .reduce<Record<string, number>>((acc, tx) => {
       const key = tx.category || 'Uncategorized';
       acc[key] = (acc[key] ?? 0) + tx.amount;
@@ -744,11 +869,11 @@ const baseSalesTypeOptions = [
 ] as const;
 
 const baseExpenseTypeOptions = [
-  { label: 'Operating expense', eventType: 'operating_expense' },
-  { label: 'Stock purchase', eventType: 'stock_purchase' },
-  { label: 'Owner withdrawal', eventType: 'owner_withdrawal' },
-  { label: 'Loan repayment', eventType: 'loan_repayment' },
-  { label: 'Supplier credit', eventType: 'supplier_credit' }
+  { label: 'Stock purchase (Direct)', eventType: 'stock_purchase' },
+  { label: 'Supplier credit (Direct, non-cash)', eventType: 'supplier_credit' },
+  { label: 'Operating expense (Indirect)', eventType: 'operating_expense' },
+  { label: 'Owner withdrawal (Non-business)', eventType: 'owner_withdrawal' },
+  { label: 'Loan repayment (Non-business)', eventType: 'loan_repayment' }
 ] as const;
 
 const normalizeCustomLineItemLabel = (label: string): string => label.trim().replace(/\s+/g, ' ').slice(0, 80);
@@ -834,13 +959,26 @@ const buildExpenseTypePrompt = (prefix?: string, customItems: string[] = []): st
     ...baseExpenseTypeOptions.map((option, index) => `${index + 1}. ${option.label}`),
     ...customItems.map((label, index) => `${baseExpenseTypeOptions.length + index + 1}. ${label}`)
   ];
-  return `${header}What type of expense was it?\n${lines.join('\n')}\nReply with 1-${lines.length} (or type the name). You can also reply BACK (0) or CANCEL (99).`;
+  return `${header}What type of expense was it? (This drives Direct vs Indirect in your reports.)\n${lines.join('\n')}\nReply with 1-${lines.length} (or type the name). You can also reply BACK (0) or CANCEL (99).`;
 };
 
 const buildCustomTypeConfirmPrompt = (
   label: string,
   kind: 'inflow' | 'expense'
 ): string => `“${label}” is not in the ${kind} type list. Add it as a new ${kind} line item? Reply YES or NO. (0 = BACK, 99 = CANCEL)`;
+
+const buildAwaitConfirmPrompt = (): string =>
+  'Reply with:\n1. SAVE (confirm)\n2. EDIT (adjust)\n0. BACK (previous step)\n99. CANCEL (stop)';
+
+const salesCategoryForCurrentDraft = (session: {
+  salesDraftId?: string;
+  salesCategory?: string;
+}): string | undefined => (session.salesDraftId ? session.salesCategory : undefined);
+
+const expenseCategoryForCurrentDraft = (session: {
+  expenseDraftId?: string;
+  expenseCategory?: string;
+}): string | undefined => (session.expenseDraftId ? session.expenseCategory : undefined);
 
 const parseYesResponse = (text: string): boolean => /^(yes|y|ok|okay|confirm|add)$/i.test(text.trim());
 const parseNoResponse = (text: string): boolean => /^(no|n)$/i.test(text.trim());
@@ -951,11 +1089,11 @@ const parseExpenseEventTypeFromText = (
     const numericMatch = value.match(/^(?:option\s*)?\(?([1-5])\)?[.)]?\s*$/i);
     if (numericMatch) {
       const fromNumeric: Record<string, Transaction['eventType']> = {
-        '1': 'operating_expense',
-        '2': 'stock_purchase',
-        '3': 'owner_withdrawal',
-        '4': 'loan_repayment',
-        '5': 'supplier_credit'
+        '1': 'stock_purchase',
+        '2': 'supplier_credit',
+        '3': 'operating_expense',
+        '4': 'owner_withdrawal',
+        '5': 'loan_repayment'
       };
       return fromNumeric[numericMatch[1]];
     }
@@ -994,6 +1132,17 @@ const defaultExpenseCategory = (eventType?: Transaction['eventType']): string | 
   if (eventType === 'stock_purchase') return 'Stock purchase';
   if (eventType === 'supplier_credit') return 'Supplier credit';
   if (eventType === 'loan_repayment') return 'Loan repayment';
+  return undefined;
+};
+
+const defaultRevenueCategory = (eventType?: Transaction['eventType']): string | undefined => {
+  if (!eventType) return undefined;
+  if (eventType === 'cash_sale') return 'Cash sale';
+  if (eventType === 'momo_sale') return 'MoMo sale';
+  if (eventType === 'credit_sale') return 'Credit sale';
+  if (eventType === 'debtor_recovery') return 'Debtor recovery';
+  if (eventType === 'capital_introduced') return 'Capital introduced';
+  if (eventType === 'loan_received') return 'Loan received';
   return undefined;
 };
 
@@ -1134,6 +1283,12 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
     session.step = 'idle';
     session.salesDraftId = undefined;
     session.expenseDraftId = undefined;
+    session.salesEventType = undefined;
+    session.salesCategory = undefined;
+    session.salesTypeConfirmed = false;
+    session.expenseEventType = undefined;
+    session.expenseCategory = undefined;
+    session.expenseTypeConfirmed = false;
     session.logDateKey = undefined;
     session.pendingBackfillDateKey = undefined;
     session.pendingSalesTypeLabel = undefined;
@@ -1195,7 +1350,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
       .filter((budget) => budget.periodStart === monthStart.toISOString())
       .map((budget) => {
         const used = monthlyTransactions
-          .filter((tx) => tx.type === budget.targetType)
+          .filter((tx) => matchesBudgetTarget(tx, budget.targetType))
           .reduce((sum, tx) => sum + tx.amount, 0);
         const remaining = budget.amount - used;
         const percentUsed = budget.amount > 0 ? Math.min(100, (used / budget.amount) * 100) : 0;
@@ -1249,12 +1404,18 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
           amount: revenueParsed.amount,
           date: logDate,
           eventType: salesEventType,
-          category: revenueParsed.category ?? session.salesCategory ?? 'Sales',
+          category: revenueParsed.category
+            ?? salesCategoryForCurrentDraft(session)
+            ?? defaultRevenueCategory(salesEventType)
+            ?? 'Cash sale',
           notes: revenueParsed.notes
         });
         session.salesDraftId = sales.id;
         session.salesEventType = salesEventType;
-        session.salesCategory = sales.category ?? 'Sales';
+        session.salesCategory = sales.category
+          ?? revenueParsed.category
+          ?? defaultRevenueCategory(salesEventType)
+          ?? 'Cash sale';
         if (explicitSalesEvent) session.salesTypeConfirmed = true;
         session.pendingSalesTypeLabel = undefined;
       }
@@ -1306,7 +1467,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
             expenseAmount: expenseDraft?.amount ?? 0,
             expenseEventType: session.expenseEventType,
             expenseCategory: expenseDraft?.category ?? session.expenseCategory
-          })}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`;
+          })}\n\n${buildAwaitConfirmPrompt()}`;
         }
       }
     }
@@ -1355,7 +1516,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
             expenseAmount: expenseDraft?.amount,
             expenseEventType: session.expenseEventType,
             expenseCategory: expenseDraft?.category ?? session.expenseCategory
-          })}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`;
+          })}\n\n${buildAwaitConfirmPrompt()}`;
         }
       }
     } else {
@@ -1370,7 +1531,9 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
           botReply = `If this is an expense, send amount + label (example: "230 transport"). Otherwise, ${buildInflowQuestionForLogDate(session.logDateKey)}`;
         } else {
           const expenseEventType = explicitExpenseEvent ?? session.expenseEventType ?? 'operating_expense';
-          const expenseCategory = expenseParsed?.category ?? session.expenseCategory ?? defaultExpenseCategory(expenseEventType);
+          const expenseCategory = expenseParsed?.category
+            ?? expenseCategoryForCurrentDraft(session)
+            ?? defaultExpenseCategory(expenseEventType);
           const expense = await upsertDraft({
             draftId: session.expenseDraftId,
             type: 'expense',
@@ -1409,12 +1572,18 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
             amount,
             date: logDate,
             eventType: salesEventType,
-            category: revenueParsed?.category ?? session.salesCategory ?? 'Sales',
+            category: revenueParsed?.category
+              ?? salesCategoryForCurrentDraft(session)
+              ?? defaultRevenueCategory(salesEventType)
+              ?? 'Cash sale',
             notes: revenueParsed?.notes
           });
           session.salesDraftId = sales.id;
           session.salesEventType = salesEventType;
-          session.salesCategory = sales.category ?? 'Sales';
+          session.salesCategory = sales.category
+            ?? revenueParsed?.category
+            ?? defaultRevenueCategory(salesEventType)
+            ?? 'Cash sale';
           if (explicitSalesEvent) session.salesTypeConfirmed = true;
           session.pendingSalesTypeLabel = undefined;
           session.step = session.salesTypeConfirmed ? 'ask_expense' : 'ask_sales_type';
@@ -1441,8 +1610,8 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
     } else {
       const inflowTypeLabel = salesChoice.customLabel ?? humanizeEventType(salesChoice.eventType);
       const inflowCategory = salesChoice.eventType === 'other'
-        ? salesChoice.customLabel ?? session.salesCategory ?? 'Other'
-        : 'Sales';
+        ? salesChoice.customLabel ?? salesCategoryForCurrentDraft(session) ?? 'Other'
+        : defaultRevenueCategory(salesChoice.eventType) ?? 'Cash sale';
       const salesDraft = findTransaction(session.salesDraftId);
       if (salesDraft) {
         const updated = await mockUpdateTransaction(salesDraft.id, {
@@ -1507,14 +1676,16 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
         salesEventType: session.salesEventType,
         salesCategory: session.salesCategory,
         expenseAmount: 0
-      })}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`;
+      })}\n\n${buildAwaitConfirmPrompt()}`;
     } else {
       const amount = expenseParsed?.amount ?? parseAmount(trimmed);
       if (amount === null) {
         botReply = 'Please send the expense amount in cedis, or type NO if there was no expense. Example: "Spent 200".';
       } else {
         const expenseEventType = explicitExpenseEvent ?? session.expenseEventType ?? 'operating_expense';
-        const expenseCategory = expenseParsed?.category ?? session.expenseCategory ?? defaultExpenseCategory(expenseEventType);
+        const expenseCategory = expenseParsed?.category
+          ?? expenseCategoryForCurrentDraft(session)
+          ?? defaultExpenseCategory(expenseEventType);
         const expense = await upsertDraft({
           draftId: session.expenseDraftId,
           type: 'expense',
@@ -1546,7 +1717,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
             expenseAmount: amount,
             expenseEventType: session.expenseEventType,
             expenseCategory: session.expenseCategory
-          })}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`;
+          })}\n\n${buildAwaitConfirmPrompt()}`;
         }
       }
     }
@@ -1601,7 +1772,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
           expenseAmount: expenseDraftLatest?.amount,
           expenseEventType: session.expenseEventType,
           expenseCategory: session.expenseCategory
-        })}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`;
+        })}\n\n${buildAwaitConfirmPrompt()}`;
       }
     }
   } else if (session.step === 'confirm_expense_type_custom') {
@@ -1635,7 +1806,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
         expenseAmount: expenseDraftLatest?.amount,
         expenseEventType: session.expenseEventType,
         expenseCategory: session.expenseCategory
-      })}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`;
+      })}\n\n${buildAwaitConfirmPrompt()}`;
     } else if (parseNoResponse(trimmed)) {
       session.pendingExpenseTypeLabel = undefined;
       session.step = 'ask_expense_type';
@@ -1675,10 +1846,10 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
         expenseAmount: updated.amount,
         expenseEventType: session.expenseEventType,
         expenseCategory: updated.category
-      })}\n\nReply SAVE to confirm, EDIT to adjust, BACK (0) for previous step, or CANCEL (99) to stop.`;
+      })}\n\n${buildAwaitConfirmPrompt()}`;
     }
   } else if (session.step === 'await_confirm') {
-    if (/^(save|confirm|yes|y|ok|okay|done)$/i.test(lower)) {
+    if (/^(1|save|confirm|yes|y|ok|okay|done)$/i.test(lower)) {
       const draftIds = [session.salesDraftId, session.expenseDraftId].filter(Boolean) as string[];
       for (const id of draftIds) {
         const tx = findTransaction(id);
@@ -1690,6 +1861,12 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
       session.step = 'idle';
       session.salesDraftId = undefined;
       session.expenseDraftId = undefined;
+      session.salesEventType = undefined;
+      session.salesCategory = undefined;
+      session.salesTypeConfirmed = false;
+      session.expenseEventType = undefined;
+      session.expenseCategory = undefined;
+      session.expenseTypeConfirmed = false;
       session.logDateKey = undefined;
       session.pendingBackfillDateKey = undefined;
       session.pendingSalesTypeLabel = undefined;
@@ -1698,7 +1875,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
       botReply = advice
         ? `Saved. Your entries are now confirmed.\n\n${advice}\n\nSend another message when you are ready to log more.`
         : 'Saved. Your entries are now confirmed. Send another message when you are ready to log more.';
-    } else if (/^(edit|change|update|no)$/i.test(lower)) {
+    } else if (/^(2|edit|change|update|no)$/i.test(lower)) {
       session.step = 'ask_sales';
       session.salesTypeConfirmed = false;
       session.expenseTypeConfirmed = false;
@@ -1707,7 +1884,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
       session.pendingExpenseTypeLabel = undefined;
       botReply = 'Okay, let’s adjust the draft. What is the correct money inflow amount?';
     } else {
-      botReply = 'Reply SAVE to confirm these draft entries, EDIT to change them, BACK (0) for previous step, or CANCEL (99) to stop.';
+      botReply = buildAwaitConfirmPrompt();
     }
   }
 
@@ -1725,7 +1902,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
     .filter((budget) => budget.periodStart === monthStart.toISOString())
     .map((budget) => {
       const used = monthlyTransactions
-        .filter((tx) => tx.type === budget.targetType)
+        .filter((tx) => matchesBudgetTarget(tx, budget.targetType))
         .reduce((sum, tx) => sum + tx.amount, 0);
       const remaining = budget.amount - used;
       const percentUsed = budget.amount > 0 ? Math.min(100, (used / budget.amount) * 100) : 0;
@@ -1848,6 +2025,25 @@ export const mockGetAdminAnalytics = async (): Promise<AdminAnalytics> => {
   }, {});
   const conversions = Object.values(referralConversionsByReferrer).reduce((sum, items) => sum + items.length, 0);
   const rewards = Object.values(referralRewardsByReferrer).flat();
+  const days = 14;
+  const now = new Date();
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  start.setUTCDate(start.getUTCDate() - (days - 1));
+  const daily = Array.from({ length: days }, (_, index) => {
+    const day = new Date(start);
+    day.setUTCDate(start.getUTCDate() + index);
+    const dateKey = day.toISOString().slice(0, 10);
+    const successful = subscriptionPayments.filter(
+      (payment) =>
+        payment.status === 'successful' &&
+        payment.createdAt.slice(0, 10) === dateKey
+    );
+    return {
+      date: dateKey,
+      count: successful.length,
+      revenue: successful.reduce((sum, payment) => sum + payment.amountMinor / 100, 0)
+    };
+  });
 
   return {
     users: {
@@ -1858,7 +2054,8 @@ export const mockGetAdminAnalytics = async (): Promise<AdminAnalytics> => {
       free
     },
     subscriptions: {
-      paidStarts: paid
+      paidStarts: subscriptionPayments.filter((payment) => payment.status === 'successful').length,
+      daily
     },
     referrals: {
       qualifiedConversions: conversions,
@@ -1875,18 +2072,112 @@ export const mockGetAdminAnalytics = async (): Promise<AdminAnalytics> => {
   };
 };
 
-export const mockGetAdminWhatsAppProvider = async (): Promise<{ provider: WhatsAppProvider; available: WhatsAppProvider[] }> => ({
+export const mockGetAdminWhatsAppProvider = async (): Promise<AdminWhatsAppSettings> => ({
   provider: activeProvider,
-  available: [...defaultProviderInfo.available]
+  available: [...defaultProviderInfo.available],
+  whatchimp: { ...mockWhatchimpSettings }
 });
 
 export const mockSetAdminWhatsAppProvider = async (
-  provider: WhatsAppProvider
-): Promise<{ provider: WhatsAppProvider; available: WhatsAppProvider[] }> => {
-  activeProvider = provider;
+  payload: {
+    provider?: WhatsAppProvider;
+    whatchimp?: Partial<AdminWhatsAppSettings['whatchimp']>;
+  }
+): Promise<AdminWhatsAppSettings> => {
+  if (payload.provider) {
+    activeProvider = payload.provider;
+  }
+  if (payload.whatchimp) {
+    mockWhatchimpSettings = {
+      ...mockWhatchimpSettings,
+      ...payload.whatchimp
+    };
+  }
   return {
     provider: activeProvider,
-    available: [...defaultProviderInfo.available]
+    available: [...defaultProviderInfo.available],
+    whatchimp: { ...mockWhatchimpSettings }
+  };
+};
+
+export const mockGetAdminPaymentSettings = async (): Promise<AdminPaymentSettings> => ({
+  ...mockPaystackSettings
+});
+
+export const mockSetAdminPaymentSettings = async (
+  payload: Partial<AdminPaymentSettings>
+): Promise<AdminPaymentSettings> => {
+  mockPaystackSettings = {
+    ...mockPaystackSettings,
+    ...payload,
+    premiumAmount: payload.premiumAmount !== undefined
+      ? Math.max(1, Math.floor(payload.premiumAmount))
+      : mockPaystackSettings.premiumAmount,
+    currencyCode: payload.currencyCode ? payload.currencyCode.toUpperCase() : mockPaystackSettings.currencyCode
+  };
+  return { ...mockPaystackSettings };
+};
+
+export const mockInitializeSubscriptionPayment = async (payload: {
+  userId: string;
+  months?: number;
+  callbackUrl?: string;
+  customerEmail?: string;
+}): Promise<SubscriptionPaymentInitialization> => {
+  const months = parsePositiveInt(payload.months, 1);
+  const amountMajor = mockPaystackSettings.premiumAmount * months;
+  const amountMinor = amountMajor * 100;
+  const reference = `mock_pay_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  subscriptionPayments.push({
+    id: `pay-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    reference,
+    userId: payload.userId,
+    amountMinor,
+    currencyCode: mockPaystackSettings.currencyCode,
+    status: 'pending',
+    createdAt: new Date().toISOString()
+  });
+
+  return {
+    reference,
+    authorizationUrl: `${window.location.origin}${window.location.pathname}?reference=${encodeURIComponent(reference)}&trxref=${encodeURIComponent(reference)}`,
+    accessCode: `access_${Math.random().toString(36).slice(2, 10)}`,
+    amountMinor,
+    amountMajor,
+    currencyCode: mockPaystackSettings.currencyCode,
+    months,
+    publicKey: mockPaystackSettings.paystackPublicKey || null
+  };
+};
+
+export const mockVerifySubscriptionPayment = async (payload: {
+  reference: string;
+}): Promise<SubscriptionPaymentVerification> => {
+  const payment = subscriptionPayments.find((entry) => entry.reference === payload.reference);
+  if (!payment) {
+    return {
+      status: 'failed',
+      applied: false,
+      user: null
+    };
+  }
+
+  if (payment.status !== 'successful') {
+    payment.status = 'successful';
+    payment.createdAt = new Date().toISOString();
+    await mockActivateUserSubscription(payment.userId, {
+      status: 'premium',
+      months: 1,
+      note: 'Mock Paystack payment success'
+    });
+  }
+
+  const user = users.find((entry) => entry.id === payment.userId) ?? null;
+  return {
+    status: 'success',
+    applied: true,
+    user
   };
 };
 
@@ -1895,7 +2186,7 @@ export const mockGetWhatsAppProviderInfo = async () => ({
   available: [...defaultProviderInfo.available]
 });
 
-export const mockSendWhatsAppMessage = async (to: string, message: string, provider?: string) => {
+export const mockSendWhatsAppMessage = async (_to: string, _message: string, provider?: string) => {
   return { success: true, provider: provider ?? activeProvider, result: { message: 'Mock send queued' } };
 };
 

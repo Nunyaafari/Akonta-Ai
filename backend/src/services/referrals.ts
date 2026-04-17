@@ -1,8 +1,8 @@
 import { Prisma } from '@prisma/client';
 import db from '../lib/db.js';
 
-export const REFERRAL_MILESTONE_SIZE = 5;
-export const REFERRAL_REWARD_MONTHS = 3;
+export const REFERRAL_MILESTONE_SIZE = 3;
+export const REFERRAL_REWARD_MONTHS = 1;
 
 const addMonthsUtc = (date: Date, months: number): Date => {
   const next = new Date(date);
@@ -80,12 +80,11 @@ export const qualifyReferralFromSubscription = async (referredUserId: string): P
       where: { id: referredUserId },
       select: {
         id: true,
-        referredByUserId: true,
-        subscriptionStatus: true
+        referredByUserId: true
       }
     });
 
-    if (!referred?.referredByUserId || referred.subscriptionStatus !== 'premium') {
+    if (!referred?.referredByUserId) {
       return;
     }
 

@@ -39,6 +39,37 @@ const addMonthsUtc = (date: Date, months: number): Date => {
   return next;
 };
 
+const resolveAppOrigin = (request: { headers: Record<string, unknown>; protocol?: string }): string => {
+  const configured = config.APP_ORIGIN?.trim();
+  if (configured && configured !== '*') {
+    return configured.replace(/\/$/, '');
+  }
+
+  const headerOrigin = request.headers.origin;
+  if (typeof headerOrigin === 'string' && headerOrigin.trim().length > 0) {
+    return headerOrigin.trim().replace(/\/$/, '');
+  }
+
+  const forwardedProto = typeof request.headers['x-forwarded-proto'] === 'string'
+    ? request.headers['x-forwarded-proto'].split(',')[0]?.trim()
+    : undefined;
+  const forwardedHost = typeof request.headers['x-forwarded-host'] === 'string'
+    ? request.headers['x-forwarded-host'].split(',')[0]?.trim()
+    : undefined;
+  const host = typeof request.headers.host === 'string'
+    ? request.headers.host.trim()
+    : '';
+
+  const resolvedHost = forwardedHost || host;
+  if (resolvedHost) {
+    const protocol = forwardedProto || request.protocol || 'https';
+    return `${protocol}://${resolvedHost}`.replace(/\/$/, '');
+  }
+
+  return 'http://localhost:5173';
+};
+const INITIAL_TRIAL_MONTHS = 1;
+
 const userRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post('/', async (request, reply) => {
     const body = request.body as {
@@ -82,13 +113,10 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
     const now = new Date();
     const desiredSubscriptionStatus: SubscriptionStatusInput = isSubscriptionStatus(body.subscriptionStatus)
       ? body.subscriptionStatus
-      : 'free';
+      : 'trial';
     const trialEndsAt = desiredSubscriptionStatus === 'trial'
-      ? addMonthsUtc(now, 0)
+      ? addMonthsUtc(now, INITIAL_TRIAL_MONTHS)
       : null;
-    if (trialEndsAt) {
-      trialEndsAt.setUTCDate(trialEndsAt.getUTCDate() + 7);
-    }
     const referralCode = await createUniqueReferralCode(body.name);
     const userCount = await db.user.count();
 
@@ -105,6 +133,7 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
             currencyCode: normalizedCurrency ?? 'GHS',
             subscriptionStatus: desiredSubscriptionStatus,
             trialEndsAt,
+            subscriptionEndsAt: desiredSubscriptionStatus === 'trial' ? trialEndsAt : null,
             referredByUserId,
             referralCode,
             isSuperAdmin: userCount === 0
@@ -117,7 +146,7 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
               userId: created.id,
               source: 'trial',
               status: 'trial',
-              monthsGranted: 0,
+              monthsGranted: INITIAL_TRIAL_MONTHS,
               startsAt: now,
               endsAt: trialEndsAt ?? null,
               note: 'Initial trial period'
@@ -139,9 +168,7 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
         return created;
       });
 
-      if (desiredSubscriptionStatus === 'premium') {
-        await qualifyReferralFromSubscription(user.id);
-      }
+      await qualifyReferralFromSubscription(user.id);
 
       reply.status(201);
       return user;
@@ -240,11 +267,7 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
     const source = body.source ?? (nextStatus === 'premium' ? 'paid' : nextStatus === 'trial' ? 'trial' : 'admin_adjustment');
     const extensionMonths = Math.floor(body.months ?? (nextStatus === 'premium' ? 1 : 0));
     const trialEndsAt = nextStatus === 'trial'
-      ? (() => {
-          const end = new Date(now);
-          end.setUTCDate(end.getUTCDate() + 7);
-          return end;
-        })()
+      ? addMonthsUtc(now, INITIAL_TRIAL_MONTHS)
       : null;
 
     let startsAt: Date | null = null;
@@ -289,10 +312,6 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
       return nextUser;
     });
 
-    if (nextStatus === 'premium') {
-      await qualifyReferralFromSubscription(id);
-    }
-
     return updated;
   });
 
@@ -335,8 +354,8 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
     const totalRewardMonths = rewards.reduce((sum, reward) => sum + reward.grantedMonths, 0);
     const progressToNext = qualifiedReferrals % REFERRAL_MILESTONE_SIZE;
     const remainingForNextReward = progressToNext === 0 ? REFERRAL_MILESTONE_SIZE : REFERRAL_MILESTONE_SIZE - progressToNext;
-    const appOrigin = config.APP_ORIGIN === '*' ? 'http://localhost:5173' : config.APP_ORIGIN;
-    const referralLink = `${appOrigin.replace(/\/$/, '')}/?ref=${encodeURIComponent(referralCode)}`;
+    const appOrigin = resolveAppOrigin(request);
+    const referralLink = `${appOrigin}/?ref=${encodeURIComponent(referralCode)}`;
 
     return {
       referralCode,

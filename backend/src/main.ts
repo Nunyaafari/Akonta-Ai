@@ -12,6 +12,7 @@ import insightRoutes from './routes/insights.js';
 import whatsappRoutes from './routes/whatsapp.js';
 import chatRoutes from './routes/chat.js';
 import adminRoutes from './routes/admin.js';
+import subscriptionsRoutes from './routes/subscriptions.js';
 
 const app = Fastify({ logger: true });
 
@@ -71,7 +72,8 @@ app.addHook('onRequest', async (request, reply) => {
   const publicPaths = new Set([
     '/api/health',
     '/api/whatsapp/webhook/twilio',
-    '/api/whatsapp/webhook/infobip'
+    '/api/whatsapp/webhook/infobip',
+    '/api/subscriptions/webhook/paystack'
   ]);
 
   if (publicPaths.has(path)) return;
@@ -90,6 +92,7 @@ await app.register(insightRoutes, { prefix: '/api/insights' });
 await app.register(whatsappRoutes, { prefix: '/api/whatsapp' });
 await app.register(chatRoutes, { prefix: '/api/chat' });
 await app.register(adminRoutes, { prefix: '/api/admin' });
+await app.register(subscriptionsRoutes, { prefix: '/api/subscriptions' });
 
 app.get('/api/health', async () => ({ status: 'ok' }));
 

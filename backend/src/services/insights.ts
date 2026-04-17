@@ -74,10 +74,17 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 
 const sumAmount = (rows: Transaction[]) => rows.reduce((sum, row) => sum + row.amount, 0);
 
+const isBusinessExpense = (transaction: Transaction): boolean => {
+  if (transaction.type !== 'expense') return false;
+  if (transaction.eventType === 'owner_withdrawal' || transaction.eventType === 'loan_repayment') return false;
+  const category = (transaction.category ?? '').toLowerCase();
+  return !/(owner|drawing|personal|private|family|loan repayment|repayment|withdraw)/i.test(category);
+};
+
 const groupExpenseCategories = (transactions: Transaction[]) => {
   const map = new Map<string, number>();
   for (const tx of transactions) {
-    if (tx.type !== 'expense') continue;
+    if (!isBusinessExpense(tx)) continue;
     const key = tx.category?.trim() || 'Uncategorized';
     map.set(key, (map.get(key) ?? 0) + tx.amount);
   }
@@ -99,7 +106,7 @@ const computeTargetStatus = (params: {
   daysInMonth: number;
 }): TargetStatusInsight => {
   const revenueTx = params.transactions.filter((tx) => tx.type === 'revenue');
-  const expenseTx = params.transactions.filter((tx) => tx.type === 'expense');
+  const expenseTx = params.transactions.filter((tx) => isBusinessExpense(tx));
   const actualRevenue = sumAmount(revenueTx);
   const actualExpenses = sumAmount(expenseTx);
   const actualProfit = actualRevenue - actualExpenses;
@@ -172,7 +179,7 @@ const computeExpenseOverrun = (params: {
   budgets: Budget[];
   targetStatus: TargetStatusInsight;
 }): ExpenseOverrunInsight => {
-  const expenseTx = params.transactions.filter((tx) => tx.type === 'expense');
+  const expenseTx = params.transactions.filter((tx) => isBusinessExpense(tx));
   const categoryTotals = groupExpenseCategories(expenseTx);
   const topExpenseCategories = Array.from(categoryTotals.entries())
     .sort((a, b) => b[1] - a[1])

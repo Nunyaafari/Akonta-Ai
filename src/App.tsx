@@ -1,19 +1,21 @@
-import { useState, useEffect, useRef } from 'react';
-import { AppView, User, ChatMessage, Transaction, SummaryPayload, WhatsAppProvider, Budget, BudgetTargetType, MonthlyInsights, PremiumInsight, ReferralProgress, AdminAnalytics } from './types';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { AppView, User, ChatMessage, Transaction, SummaryPayload, WhatsAppProvider, Budget, BudgetTargetType, MonthlyInsights, AdminPaymentSettings, AdminWhatsAppSettings } from './types';
 import { 
-  WhatsAppIcon, ChartIcon, HistoryIcon,
+  ChartIcon, HistoryIcon,
   SendIcon, TrendingUpIcon, TrendingDownIcon, HomeIcon, 
   CalendarIcon, ArrowLeftIcon, CheckIcon, ClockIcon, BellIcon, ChatIcon, SettingsIcon, ShieldIcon
 } from './components/Icons';
 import { 
   mockTransactions, currentWeekSummary, currentMonthSummary, 
-  premiumInsights, chatMessages 
+  chatMessages 
 } from './data/mockData';
-import SummaryChart from './components/SummaryChart';
+import SalesProfitTrendChart, { type SalesProfitTrendPoint } from './components/SalesProfitTrendChart';
 import {
   activateUserSubscription,
   createUser,
   getAdminAnalytics,
+  getAdminPaymentSettings,
   getAdminWhatsAppProvider,
   getCurrentBudgets,
   getCurrentInsights,
@@ -22,128 +24,94 @@ import {
   getReferralProgress,
   getTransactions,
   getWeeklySummary,
+  initializeSubscriptionPayment,
+  isOfflineSyncError,
   postBudget,
   postChatEntry,
   registerDemoModeListener,
+  setAdminPaymentSettings,
   setAdminWhatsAppProvider,
+  verifySubscriptionPayment,
   updateUser
 } from './lib/api';
+import {
+  buildCashFlowCsvRows,
+  buildCashFlowStatementHtml,
+  buildProfitLossCsvRows,
+  buildProfitLossStatementHtml,
+  downloadCsvFile,
+  generateCashFlowPdf,
+  generateProfitLossPdf,
+  printStatementHtml,
+  sanitizeFileName
+} from './utils/reports';
+import { formatCurrencyValue, formatDate, formatTime, parseDateValue } from './utils/formatters';
+import { createSummaryFromTransactions, buildCashFlowLineItems, buildProfitLossLines } from './utils/summary';
+import { LandingView } from './components/LandingView';
+import {
+  enqueuePendingChatMessage,
+  getPendingChatCount,
+  listPendingChatMessages,
+  markPendingChatMessageFailure,
+  removePendingChatMessage
+} from './lib/offlineQueue';
 
-// Format currency
-const formatCurrencyValue = (amount: number, currencyCode = 'GHS') => {
-  try {
-    return new Intl.NumberFormat('en-GH', {
-      style: 'currency',
-      currency: currencyCode,
-      maximumFractionDigits: 2
-    }).format(amount);
-  } catch {
-    return `${currencyCode} ${amount.toLocaleString()}`;
-  }
-};
-
-// Format date
-const formatDate = (date: Date) => {
-  return new Date(date).toLocaleDateString('en-GH', { 
-    weekday: 'short', 
-    month: 'short', 
-    day: 'numeric' 
-  });
-};
-
-// Format time
-const formatTime = (date: Date) => {
-  return new Date(date).toLocaleTimeString('en-GH', { 
-    hour: 'numeric', 
-    minute: '2-digit',
-    hour12: true 
-  });
-};
-
-const brandLogoSrc = '/brand/fav.svg';
 const brandMarkSrc = '/brand/fav.svg';
 const appCopyrightNotice = `© ${new Date().getFullYear()} All rights reserved. Amagold Technologies Ltd.`;
 const supportedCurrencies = ['GHS', 'USD', 'NGN', 'KES', 'EUR', 'GBP'] as const;
 
+const hasActivePremiumWindow = (user: User | null): boolean => {
+  if (!user) return false;
+  if (user.subscriptionStatus === 'free') return false;
+  const accessEnd = parseDateValue(user.subscriptionEndsAt ?? user.trialEndsAt ?? null);
+  if (!accessEnd) return user.subscriptionStatus === 'premium';
+  return accessEnd.getTime() > Date.now();
+};
+
+const resolveDayPart = (timeZone?: string): 'morning' | 'afternoon' | 'evening' => {
+  const now = new Date();
+  let hour = now.getHours();
+  if (timeZone) {
+    const formattedHour = new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', hour12: false }).format(now);
+    const parsedHour = Number(formattedHour);
+    if (!Number.isNaN(parsedHour)) hour = parsedHour;
+  }
+  if (hour < 12) return 'morning';
+  if (hour < 17) return 'afternoon';
+  return 'evening';
+};
+
 const defaultWeeklySummary: SummaryPayload = {
-  totalRevenue: currentWeekSummary.totalRevenue,
-  totalExpenses: currentWeekSummary.totalExpenses,
-  profit: currentWeekSummary.profit,
-  transactionCount: currentWeekSummary.transactionCount,
-  categoryBreakdown: {},
+  totalRevenue: currentWeekSummary.totalRevenue, totalExpenses: currentWeekSummary.totalExpenses,
+  directExpenses: currentWeekSummary.totalExpenses, indirectExpenses: 0, nonBusinessExpenses: 0,
+  grossProfit: currentWeekSummary.totalRevenue - currentWeekSummary.totalExpenses,
+  netProfit: currentWeekSummary.profit, profit: currentWeekSummary.profit, transactionCount: currentWeekSummary.transactionCount,
+  categoryBreakdown: {}, directExpenseBreakdown: {}, indirectExpenseBreakdown: {},
   dailyBreakdown: currentWeekSummary.dailyBreakdown.map((day) => ({
-    date: day.date.toISOString().slice(0, 10),
-    revenue: day.revenue,
-    expenses: day.expenses
-  }))
+    date: day.date.toISOString().slice(0, 10), revenue: day.revenue, expenses: day.expenses
+  })),
+  cashFlow: {
+    operatingInflow: currentWeekSummary.totalRevenue, operatingOutflow: currentWeekSummary.totalExpenses,
+    financingInflow: 0, financingOutflow: 0, totalCashInflow: currentWeekSummary.totalRevenue,
+    totalCashOutflow: currentWeekSummary.totalExpenses, netCashFlow: currentWeekSummary.profit
+  }
 };
 
 const emptySummaryPayload: SummaryPayload = {
-  totalRevenue: 0,
-  totalExpenses: 0,
-  profit: 0,
-  transactionCount: 0,
-  categoryBreakdown: {},
-  dailyBreakdown: []
+  totalRevenue: 0, totalExpenses: 0, directExpenses: 0, indirectExpenses: 0, nonBusinessExpenses: 0,
+  grossProfit: 0, netProfit: 0, profit: 0, transactionCount: 0, categoryBreakdown: {},
+  directExpenseBreakdown: {}, indirectExpenseBreakdown: {}, dailyBreakdown: [],
+  cashFlow: {
+    operatingInflow: 0, operatingOutflow: 0, financingInflow: 0, financingOutflow: 0,
+    totalCashInflow: 0, totalCashOutflow: 0, netCashFlow: 0
+  }
 };
 
-const createSummaryFromTransactions = (transactions: Transaction[]): SummaryPayload => {
-  const categoryBreakdown: Record<string, { revenue: number; expense: number; total: number }> = {};
-  const dailyMap: Record<string, { revenue: number; expenses: number }> = {};
-  let totalRevenue = 0;
-  let totalExpenses = 0;
+type ChatEntryResult = Awaited<ReturnType<typeof postChatEntry>>;
+type UpdateUserPayload = Parameters<typeof updateUser>[1];
+type PostBudgetPayload = Parameters<typeof postBudget>[0];
+type ActivateSubscriptionPayload = Parameters<typeof activateUserSubscription>[1];
 
-  transactions.forEach((tx) => {
-    if (tx.type === 'revenue') {
-      totalRevenue += tx.amount;
-    } else {
-      totalExpenses += tx.amount;
-    }
-
-    const category = tx.category || 'Other';
-    const categoryEntry = categoryBreakdown[category] ?? { revenue: 0, expense: 0, total: 0 };
-    if (tx.type === 'revenue') {
-      categoryEntry.revenue += tx.amount;
-    } else {
-      categoryEntry.expense += tx.amount;
-    }
-    categoryEntry.total = categoryEntry.revenue - categoryEntry.expense;
-    categoryBreakdown[category] = categoryEntry;
-
-    const txDate = new Date(tx.date);
-    const dateKey = Number.isNaN(txDate.getTime())
-      ? new Date().toISOString().slice(0, 10)
-      : txDate.toISOString().slice(0, 10);
-    const dailyEntry = dailyMap[dateKey] ?? { revenue: 0, expenses: 0 };
-    if (tx.type === 'revenue') {
-      dailyEntry.revenue += tx.amount;
-    } else {
-      dailyEntry.expenses += tx.amount;
-    }
-    dailyMap[dateKey] = dailyEntry;
-  });
-
-  return {
-    totalRevenue,
-    totalExpenses,
-    profit: totalRevenue - totalExpenses,
-    transactionCount: transactions.length,
-    categoryBreakdown,
-    dailyBreakdown: Object.entries(dailyMap)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([date, values]) => ({ date, revenue: values.revenue, expenses: values.expenses }))
-  };
-};
-
-const escapeHtml = (value: string): string =>
-  value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-
-const sanitizeFileName = (value: string): string => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 const toDateInputValue = (value: Date): string =>
   `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
 const INSTALL_PROMPT_DISMISS_KEY = 'akontaai-install-dismissed-at';
@@ -178,30 +146,69 @@ const shiftDateKey = (dateKey: string, delta: number): string => {
   return `${base.getUTCFullYear()}-${String(base.getUTCMonth() + 1).padStart(2, '0')}-${String(base.getUTCDate()).padStart(2, '0')}`;
 };
 
-const buildProfitLossLines = (summary: SummaryPayload): {
-  incomeLines: Array<{ label: string; amount: number }>;
-  expenseLines: Array<{ label: string; amount: number }>;
-} => {
-  const entries = Object.entries(summary.categoryBreakdown);
-
-  const incomeLines = entries
-    .map(([category, values]) => ({ label: category, amount: values.revenue ?? 0 }))
-    .filter((line) => line.amount > 0)
-    .sort((a, b) => b.amount - a.amount);
-
-  const expenseLines = entries
-    .map(([category, values]) => ({ label: category, amount: values.expense ?? 0 }))
-    .filter((line) => line.amount > 0)
-    .sort((a, b) => b.amount - a.amount);
-
-  if (incomeLines.length === 0 && summary.totalRevenue > 0) {
-    incomeLines.push({ label: 'Business Income', amount: summary.totalRevenue });
+const mergeBusinessExpenseBreakdown = (summary: SummaryPayload): Array<{ category: string; amount: number }> => {
+  const merged: Record<string, number> = {};
+  for (const [category, amount] of Object.entries(summary.directExpenseBreakdown ?? {})) {
+    merged[category] = (merged[category] ?? 0) + amount;
   }
-  if (expenseLines.length === 0 && summary.totalExpenses > 0) {
-    expenseLines.push({ label: 'Business Expenses', amount: summary.totalExpenses });
+  for (const [category, amount] of Object.entries(summary.indirectExpenseBreakdown ?? {})) {
+    merged[category] = (merged[category] ?? 0) + amount;
+  }
+  return Object.entries(merged).map(([category, amount]) => ({ category, amount }));
+};
+
+const isBusinessExpenseForTrend = (tx: Transaction): boolean => {
+  if (tx.type !== 'expense') return false;
+  if (tx.eventType === 'owner_withdrawal' || tx.eventType === 'loan_repayment') return false;
+  const category = (tx.category ?? '').toLowerCase();
+  return !/(owner|drawing|personal|private|family|loan repayment|repayment|withdraw)/i.test(category);
+};
+
+const isSalesEvent = (tx: Transaction): boolean =>
+  tx.type === 'revenue' && (tx.eventType === 'cash_sale' || tx.eventType === 'momo_sale' || tx.eventType === 'credit_sale');
+
+const buildSalesProfitTrendPoints = (params: {
+  transactions: Transaction[];
+  mode: 'monthly' | 'yearly';
+  year: number;
+  month: number;
+}): SalesProfitTrendPoint[] => {
+  const dataMap: Record<string, { label: string; sales: number; businessExpenses: number }> = {};
+
+  if (params.mode === 'monthly') {
+    const daysInMonth = new Date(Date.UTC(params.year, params.month, 0)).getUTCDate();
+    for (let day = 1; day <= daysInMonth; day += 1) {
+      const key = `${params.year}-${String(params.month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      dataMap[key] = { label: String(day), sales: 0, businessExpenses: 0 };
+    }
+  } else {
+    for (let month = 1; month <= 12; month += 1) {
+      const key = `${params.year}-${String(month).padStart(2, '0')}`;
+      const label = new Date(Date.UTC(params.year, month - 1, 1)).toLocaleDateString('en-GH', { month: 'short' });
+      dataMap[key] = { label, sales: 0, businessExpenses: 0 };
+    }
   }
 
-  return { incomeLines, expenseLines };
+  params.transactions.forEach((tx) => {
+    const date = new Date(tx.date);
+    if (Number.isNaN(date.getTime())) return;
+    const key = params.mode === 'monthly'
+      ? date.toISOString().slice(0, 10)
+      : date.toISOString().slice(0, 7);
+    if (!dataMap[key]) return;
+
+    if (isSalesEvent(tx)) dataMap[key].sales += tx.amount;
+    if (isBusinessExpenseForTrend(tx)) dataMap[key].businessExpenses += tx.amount;
+  });
+
+  return Object.entries(dataMap)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => ({
+      key,
+      label: value.label,
+      sales: value.sales,
+      profit: value.sales - value.businessExpenses
+    }));
 };
 
 type HistoryDatePreset = 'this_month' | 'last_month' | 'last_90_days' | 'all_time' | 'custom';
@@ -212,10 +219,6 @@ export default function App() {
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [messages, setMessages] = useState<ChatMessage[]>(chatMessages);
   const [inputValue, setInputValue] = useState('');
-  const [transactions, setTransactions] = useState<Transaction[]>(mockTransactions);
-  const [weeklySummary, setWeeklySummary] = useState<SummaryPayload | null>(null);
-  const [monthlySummary, setMonthlySummary] = useState<SummaryPayload | null>(null);
-  const [currentInsights, setCurrentInsights] = useState<MonthlyInsights | null>(null);
   const [reportMode, setReportMode] = useState<'monthly' | 'yearly'>('monthly');
   const [selectedReportYear, setSelectedReportYear] = useState<number>(new Date().getUTCFullYear());
   const [selectedReportMonth, setSelectedReportMonth] = useState<number>(new Date().getUTCMonth() + 1);
@@ -224,24 +227,18 @@ export default function App() {
   const [reportSummaryCache, setReportSummaryCache] = useState<Record<string, SummaryPayload>>({});
   const [reportInsightsCache, setReportInsightsCache] = useState<Record<string, MonthlyInsights>>({});
   const [dashboardTab, setDashboardTab] = useState<'overview' | 'reports'>('overview');
-  const [budgets, setBudgets] = useState<Budget[]>([]);
-  const [referralProgress, setReferralProgress] = useState<ReferralProgress | null>(null);
+  const [reportLockNotice, setReportLockNotice] = useState<string | null>(null);
   const [isReferralLoading, setIsReferralLoading] = useState(false);
   const [referralCopyMessage, setReferralCopyMessage] = useState<string | null>(null);
-  const [adminAnalytics, setAdminAnalytics] = useState<AdminAnalytics | null>(null);
-  const [adminProviderInfo, setAdminProviderInfo] = useState<{ provider: WhatsAppProvider; available: WhatsAppProvider[] } | null>(null);
-  const [isAdminSaving, setIsAdminSaving] = useState(false);
+  const [adminWhatchimpDraft, setAdminWhatchimpDraft] = useState<AdminWhatsAppSettings['whatchimp'] | null>(null);
+  const [adminPaymentDraft, setAdminPaymentDraft] = useState<AdminPaymentSettings | null>(null);
   const [adminError, setAdminError] = useState<string | null>(null);
   const [budgetTargetType, setBudgetTargetType] = useState<BudgetTargetType>('expense');
   const [budgetAmount, setBudgetAmount] = useState('');
   const [isDemoMode, setIsDemoMode] = useState(false);
   const [heroSlide, setHeroSlide] = useState(0);
-  const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [botContext, setBotContext] = useState<{ customer?: string; objective?: string; revenueTarget?: number; expenseTarget?: number; cashBalance?: number; cashSales?: number; momoSales?: number; creditSales?: number; debtRecovery?: number; expenseCategory?: string; personalExpense?: number; salesAmount?: number; expenseAmount?: number; closingBalance?: number }>({});
-  const [followUpStep, setFollowUpStep] = useState<'customer' | 'targets' | 'cash' | 'sales' | 'salesBreakdown' | 'debtRecovery' | 'expense' | 'expenseCategory' | 'supportingDoc' | 'confirmRecord' | 'closingBalance' | 'confirmImpact' | null>(null);
-  const [impactTransaction, setImpactTransaction] = useState<Transaction | null>(null);
-  const [supportTransaction, setSupportTransaction] = useState<Transaction | null>(null);
+  const [, setFollowUpStep] = useState<'customer' | 'targets' | 'cash' | 'sales' | 'salesBreakdown' | 'debtRecovery' | 'expense' | 'expenseCategory' | 'supportingDoc' | 'confirmRecord' | 'closingBalance' | 'confirmImpact' | null>(null);
   const [attachmentTransaction, setAttachmentTransaction] = useState<Transaction | null>(null);
   const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
   const [isAppInstalled, setIsAppInstalled] = useState(false);
@@ -253,9 +250,18 @@ export default function App() {
   const [historyTransactionTypeFilter, setHistoryTransactionTypeFilter] = useState<'all' | 'revenue' | 'expense'>('all');
   const [historyAttachmentFilter, setHistoryAttachmentFilter] = useState<'all' | 'with' | 'without'>('all');
   const [settingsCurrencyCode, setSettingsCurrencyCode] = useState<'GHS' | 'USD' | 'NGN' | 'KES' | 'EUR' | 'GBP'>('GHS');
+  const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
+  const [pendingSyncCount, setPendingSyncCount] = useState(0);
+  const [isOutboxSyncing, setIsOutboxSyncing] = useState(false);
 
   const activeCurrencyCode = user?.currencyCode ?? 'GHS';
+  const isSuperAdmin = Boolean(user?.isSuperAdmin);
   const formatCurrency = (amount: number) => formatCurrencyValue(amount, activeCurrencyCode);
+  const hasReportAccess = hasActivePremiumWindow(user);
+  const subscriptionAccessEnd = parseDateValue(user?.subscriptionEndsAt ?? user?.trialEndsAt ?? null);
+  const subscriptionDaysRemaining = subscriptionAccessEnd
+    ? Math.max(0, Math.ceil((subscriptionAccessEnd.getTime() - Date.now()) / (1000 * 60 * 60 * 24)))
+    : null;
   
   // Onboarding form state
   const [formData, setFormData] = useState<{
@@ -274,15 +280,218 @@ export default function App() {
   const [onboardingReferralCode, setOnboardingReferralCode] = useState<string | null>(null);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const queryClient = useQueryClient();
+  const invalidateUserDataQueries = useCallback((userId: string, options?: { includeBudgets?: boolean }) => {
+    queryClient.invalidateQueries({ queryKey: ['transactions', userId] });
+    queryClient.invalidateQueries({ queryKey: ['weekly-summary', userId] });
+    queryClient.invalidateQueries({ queryKey: ['monthly-summary', userId] });
+    queryClient.invalidateQueries({ queryKey: ['current-insights', userId] });
+    queryClient.invalidateQueries({ queryKey: ['referrals', userId] });
+    queryClient.invalidateQueries({ queryKey: ['selected-report', userId] });
+    if (options?.includeBudgets) {
+      queryClient.invalidateQueries({ queryKey: ['budgets', userId] });
+    }
+  }, [queryClient]);
+
+  const postChatEntryMutation = useMutation({
+    mutationFn: (payload: { userId: string; message: string; channel: 'web' | 'whatsapp' }) =>
+      postChatEntry(payload.userId, payload.message, payload.channel)
+  });
+
+  const saveBudgetMutation = useMutation({
+    mutationFn: (payload: PostBudgetPayload) => postBudget(payload),
+    onSuccess: (_savedBudget, payload) => {
+      invalidateUserDataQueries(payload.userId, { includeBudgets: true });
+    }
+  });
+
+  const updateUserMutation = useMutation({
+    mutationFn: (payload: { id: string; updates: UpdateUserPayload }) => updateUser(payload.id, payload.updates)
+  });
+
+  const createUserMutation = useMutation({
+    mutationFn: (payload: Partial<User>) => createUser(payload)
+  });
+
+  const initializeSubscriptionMutation = useMutation({
+    mutationFn: (payload: {
+      userId: string;
+      months?: number;
+      callbackUrl?: string;
+      customerEmail?: string;
+    }) => initializeSubscriptionPayment(payload)
+  });
+
+  const verifySubscriptionMutation = useMutation({
+    mutationFn: (reference: string) => verifySubscriptionPayment(reference)
+  });
+
+  const activateSubscriptionMutation = useMutation({
+    mutationFn: (payload: { userId: string; request: ActivateSubscriptionPayload }) =>
+      activateUserSubscription(payload.userId, payload.request),
+    onSuccess: (_updated, payload) => {
+      queryClient.invalidateQueries({ queryKey: ['referrals', payload.userId] });
+      queryClient.invalidateQueries({ queryKey: ['admin-analytics'] });
+    }
+  });
+  const isOnboardingSubmitting = createUserMutation.isPending;
+  const isSavingCurrency = updateUserMutation.isPending;
+  const isSavingBudget = saveBudgetMutation.isPending;
+  const isStartingCheckout = initializeSubscriptionMutation.isPending;
+  const isActivatingPremium = activateSubscriptionMutation.isPending;
+  const isAnySettingsActionPending = isSavingCurrency || isSavingBudget || isStartingCheckout || isActivatingPremium;
+
+  const currentPeriodContext = useMemo(() => {
+    const now = new Date();
+    const weekStartDate = new Date(now);
+    weekStartDate.setDate(now.getDate() - 6);
+    weekStartDate.setHours(0, 0, 0, 0);
+    const weekEndDate = new Date(now);
+    weekEndDate.setHours(23, 59, 59, 999);
+    return {
+      weekStart: weekStartDate.toISOString().slice(0, 10),
+      weekEnd: weekEndDate.toISOString().slice(0, 10),
+      currentYear: now.getUTCFullYear(),
+      currentMonth: now.getUTCMonth() + 1,
+      currentKey: `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`
+    };
+  }, [user?.id]);
+
+  const transactionsQuery = useQuery({
+    queryKey: ['transactions', user?.id],
+    enabled: Boolean(user?.id),
+    queryFn: () => getTransactions(user!.id)
+  });
+
+  const weeklySummaryQuery = useQuery({
+    queryKey: ['weekly-summary', user?.id, currentPeriodContext.weekStart, currentPeriodContext.weekEnd],
+    enabled: Boolean(user?.id),
+    queryFn: () => getWeeklySummary(user!.id, currentPeriodContext.weekStart, currentPeriodContext.weekEnd)
+  });
+
+  const monthlySummaryQuery = useQuery({
+    queryKey: ['monthly-summary', user?.id, currentPeriodContext.currentYear, currentPeriodContext.currentMonth],
+    enabled: Boolean(user?.id),
+    queryFn: () => getMonthlySummary(user!.id, currentPeriodContext.currentYear, currentPeriodContext.currentMonth)
+  });
+
+  const currentInsightsQuery = useQuery({
+    queryKey: ['current-insights', user?.id, currentPeriodContext.currentYear, currentPeriodContext.currentMonth],
+    enabled: Boolean(user?.id),
+    queryFn: () => getCurrentInsights(user!.id)
+  });
+
+  const referralProgressQuery = useQuery({
+    queryKey: ['referrals', user?.id],
+    enabled: Boolean(user?.id),
+    queryFn: () => getReferralProgress(user!.id)
+  });
+
+  const budgetsQuery = useQuery({
+    queryKey: ['budgets', user?.id],
+    enabled: Boolean(user?.id),
+    queryFn: () => getCurrentBudgets(user!.id)
+  });
+
+  const selectedReportDataQuery = useQuery({
+    queryKey: ['selected-report', user?.id, selectedReportYear, selectedReportMonth],
+    enabled: Boolean(user?.id) && reportMode === 'monthly',
+    queryFn: async () => {
+      const [monthly, insights] = await Promise.all([
+        getMonthlySummary(user!.id, selectedReportYear, selectedReportMonth),
+        getMonthlyInsights(user!.id, selectedReportYear, selectedReportMonth)
+      ]);
+      return { monthly, insights };
+    }
+  });
+
+  const adminAnalyticsQuery = useQuery({
+    queryKey: ['admin-analytics', user?.id],
+    enabled: isSuperAdmin,
+    queryFn: () => getAdminAnalytics(),
+    staleTime: 60_000,
+    refetchOnWindowFocus: false
+  });
+
+  const adminProviderQuery = useQuery({
+    queryKey: ['admin-whatsapp-provider', user?.id],
+    enabled: isSuperAdmin,
+    queryFn: () => getAdminWhatsAppProvider(),
+    staleTime: 60_000,
+    refetchOnWindowFocus: false
+  });
+
+  const adminPaymentSettingsQuery = useQuery({
+    queryKey: ['admin-payment-settings', user?.id],
+    enabled: isSuperAdmin,
+    queryFn: () => getAdminPaymentSettings(),
+    staleTime: 60_000,
+    refetchOnWindowFocus: false
+  });
+
+  const updateAdminProviderMutation = useMutation({
+    mutationFn: (payload: {
+      provider?: WhatsAppProvider;
+      whatchimp?: Partial<AdminWhatsAppSettings['whatchimp']>;
+    }) => setAdminWhatsAppProvider(payload),
+    onSuccess: (updated) => {
+      queryClient.setQueryData(['admin-whatsapp-provider', user?.id], updated);
+      setAdminWhatchimpDraft(updated.whatchimp);
+      queryClient.invalidateQueries({ queryKey: ['admin-analytics', user?.id] });
+    }
+  });
+
+  const updateAdminPaymentMutation = useMutation({
+    mutationFn: (payload: Partial<AdminPaymentSettings>) => setAdminPaymentSettings(payload),
+    onSuccess: (updated) => {
+      queryClient.setQueryData(['admin-payment-settings', user?.id], updated);
+      setAdminPaymentDraft(updated);
+      queryClient.invalidateQueries({ queryKey: ['admin-analytics', user?.id] });
+    }
+  });
+
+  const transactions = transactionsQuery.data ?? (user ? [] : mockTransactions);
+  const weeklySummary = weeklySummaryQuery.data?.summary ?? null;
+  const monthlySummary = monthlySummaryQuery.data?.summary ?? null;
+  const currentInsights = currentInsightsQuery.data ?? null;
+  const referralProgress = referralProgressQuery.data ?? null;
+  const budgets = budgetsQuery.data ?? [];
+  const adminAnalytics = adminAnalyticsQuery.data ?? null;
+  const adminProviderInfo = adminProviderQuery.data ?? null;
+  const adminPaymentSettings = adminPaymentSettingsQuery.data ?? null;
+  const effectiveReferralLink = referralProgress?.referralLink
+    ?? (referralProgress?.referralCode
+      ? `${window.location.origin}/?ref=${encodeURIComponent(referralProgress.referralCode)}`
+      : null)
+    ?? (user?.referralCode
+      ? `${window.location.origin}/?ref=${encodeURIComponent(user.referralCode)}`
+      : null);
+  const isAdminSaving = updateAdminProviderMutation.isPending || updateAdminPaymentMutation.isPending;
 
   const activeWeeklySummary = weeklySummary ?? defaultWeeklySummary;
   const activeMonthlySummary = monthlySummary ?? {
     totalRevenue: currentMonthSummary.totalRevenue,
     totalExpenses: currentMonthSummary.totalExpenses,
+    directExpenses: currentMonthSummary.totalExpenses,
+    indirectExpenses: 0,
+    nonBusinessExpenses: 0,
+    grossProfit: currentMonthSummary.totalRevenue - currentMonthSummary.totalExpenses,
+    netProfit: currentMonthSummary.profit,
     profit: currentMonthSummary.profit,
     transactionCount: currentMonthSummary.transactionCount,
     categoryBreakdown: {},
-    dailyBreakdown: []
+    directExpenseBreakdown: {},
+    indirectExpenseBreakdown: {},
+    dailyBreakdown: [],
+    cashFlow: {
+      operatingInflow: currentMonthSummary.totalRevenue,
+      operatingOutflow: currentMonthSummary.totalExpenses,
+      financingInflow: 0,
+      financingOutflow: 0,
+      totalCashInflow: currentMonthSummary.totalRevenue,
+      totalCashOutflow: currentMonthSummary.totalExpenses,
+      netCashFlow: currentMonthSummary.profit
+    }
   };
 
   const canShowInstallPromptByCooldown = () => {
@@ -364,6 +573,7 @@ export default function App() {
 
   const confirmedTransactions = transactions.filter((tx) => tx.status === 'confirmed' && !tx.correctionOfId);
   const userTimeZone = user?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const dashboardDayPart = resolveDayPart(userTimeZone);
   const uniqueConfirmedDateKeys = Array.from(
     new Set(
       confirmedTransactions
@@ -395,29 +605,39 @@ export default function App() {
         confirmedTransactions.filter((tx) => new Date(tx.date).getUTCFullYear() === selectedReportYear)
       )
     : selectedReportSummary ?? cachedReportSummary ?? (isSelectedCurrentMonth ? activeMonthlySummary : emptySummaryPayload);
+  const activeReportTransactions = confirmedTransactions.filter((tx) => {
+    const txDate = new Date(tx.date);
+    if (Number.isNaN(txDate.getTime())) return false;
+    if (reportMode === 'yearly') {
+      return txDate.getUTCFullYear() === selectedReportYear;
+    }
+    return txDate.getUTCFullYear() === selectedReportYear && txDate.getUTCMonth() + 1 === selectedReportMonth;
+  });
 
-  const dashboardTopExpenseCategories = Object.keys(activeMonthlySummary.categoryBreakdown).length
-    ? Object.entries(activeMonthlySummary.categoryBreakdown)
-        .map(([category, values]) => ({
-          category,
-          amount: values.expense ?? values.total ?? 0
-        }))
+  const dashboardTopExpenseCategories = (
+    Object.keys(activeMonthlySummary.directExpenseBreakdown ?? {}).length
+    || Object.keys(activeMonthlySummary.indirectExpenseBreakdown ?? {}).length
+  )
+    ? mergeBusinessExpenseBreakdown(activeMonthlySummary)
         .sort((a, b) => b.amount - a.amount)
         .slice(0, 5)
     : currentMonthSummary.topExpenseCategories;
 
-  const reportTopExpenseCategories = Object.entries(activeReportSummary.categoryBreakdown)
-    .map(([category, values]) => ({
-      category,
-      amount: values.expense ?? values.total ?? 0
-    }))
+  const reportTopExpenseCategories = mergeBusinessExpenseBreakdown(activeReportSummary)
     .filter((row) => row.amount > 0)
     .sort((a, b) => b.amount - a.amount)
     .slice(0, 5);
+  const cashFlowLineItems = buildCashFlowLineItems(activeReportTransactions);
+  const salesProfitTrendPoints = buildSalesProfitTrendPoints({
+    transactions: activeReportTransactions,
+    mode: reportMode,
+    year: selectedReportYear,
+    month: selectedReportMonth
+  });
 
-  const { incomeLines, expenseLines } = buildProfitLossLines(activeReportSummary);
+  const { incomeLines, directExpenseLines, indirectExpenseLines } = buildProfitLossLines(activeReportSummary);
   const netMargin = activeReportSummary.totalRevenue > 0
-    ? (activeReportSummary.profit / activeReportSummary.totalRevenue) * 100
+    ? (activeReportSummary.netProfit / activeReportSummary.totalRevenue) * 100
     : 0;
 
   const reportPeriodEndDate = reportMode === 'yearly'
@@ -432,7 +652,7 @@ export default function App() {
   const accountantReviewNote = reportMode === 'monthly'
     ? (selectedReportInsights ?? cachedReportInsights ?? (isSelectedCurrentMonth ? currentInsights : null))?.highlights[0]
       ?? 'Keep consistent daily records and category discipline to support reporting quality.'
-    : activeReportSummary.profit >= 0
+    : activeReportSummary.netProfit >= 0
       ? 'The business remained profitable in the selected year. Maintain controls on expense-heavy categories.'
       : 'The selected year shows a loss position. Review pricing, sales mix, and controllable expenses.'
   const statementPeriodKey = reportMode === 'yearly'
@@ -440,305 +660,96 @@ export default function App() {
     : `${selectedReportYear}-${String(selectedReportMonth).padStart(2, '0')}`;
   const statementBusinessKey = sanitizeFileName(user?.businessName ?? 'akonta-ai');
 
-  const buildProfitLossStatementHtml = () => {
-    const businessName = user?.businessName || 'Akonta AI Business';
-    const ownerName = user?.name || 'Business Owner';
-    const preparedOn = new Date().toLocaleDateString('en-GH', { month: 'long', day: 'numeric', year: 'numeric' });
-    const incomeRows = incomeLines.length > 0
-      ? incomeLines.map((line) => `
-        <tr>
-          <td>${escapeHtml(line.label)}</td>
-          <td class="amount">${formatCurrency(line.amount)}</td>
-        </tr>
-      `).join('')
-      : `
-        <tr>
-          <td>No income recorded</td>
-          <td class="amount">${formatCurrency(0)}</td>
-        </tr>
-      `;
-    const expenseRows = expenseLines.length > 0
-      ? expenseLines.map((line) => `
-        <tr class="expense-line">
-          <td>${escapeHtml(line.label)}</td>
-          <td class="amount">${formatCurrency(line.amount)}</td>
-        </tr>
-      `).join('')
-      : `
-        <tr>
-          <td>No expenses recorded</td>
-          <td class="amount">${formatCurrency(0)}</td>
-        </tr>
-      `;
+  const profitLossStatementParams = {
+    user,
+    reportPeriodLabel,
+    reportStatementSubtitle,
+    activeCurrencyCode,
+    statementPreparedBy,
+    appCopyrightNotice,
+    reportMode,
+    incomeLines,
+    directExpenseLines,
+    indirectExpenseLines,
+    activeReportSummary,
+    netMargin,
+    accountantReviewNote
+  };
 
-    return `
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Profit and Loss Statement</title>
-  <style>
-    body { font-family: "Times New Roman", Georgia, serif; color: #111827; margin: 40px; }
-    .sheet { max-width: 820px; margin: 0 auto; }
-    h1 { font-size: 30px; margin: 0; letter-spacing: 0.02em; text-transform: uppercase; }
-    h2 { margin: 8px 0 0; font-size: 16px; font-weight: 500; color: #374151; }
-    .meta { margin-top: 18px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 13px; }
-    .label { color: #6b7280; text-transform: uppercase; letter-spacing: 0.06em; font-size: 11px; display: block; margin-bottom: 2px; }
-    table { width: 100%; border-collapse: collapse; margin-top: 24px; font-size: 14px; }
-    thead th { text-align: left; border-bottom: 2px solid #111827; padding: 8px 0; text-transform: uppercase; letter-spacing: 0.06em; font-size: 11px; color: #4b5563; }
-    tbody td { border-bottom: 1px solid #e5e7eb; padding: 8px 0; }
-    .expense-line td:first-child { padding-left: 22px; }
-    td.amount { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-    .section { margin-top: 22px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: #374151; font-weight: 700; }
-    .totals tr td { font-weight: 700; border-bottom: 0; padding-top: 10px; }
-    .net-profit { color: ${activeReportSummary.profit >= 0 ? '#047857' : '#b91c1c'}; }
-    .review { margin-top: 20px; border: 1px solid #d1d5db; border-radius: 10px; padding: 12px; background: #f9fafb; font-size: 13px; line-height: 1.5; }
-    .review .label { margin-bottom: 6px; }
-    .sign-grid { margin-top: 24px; display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-    .sign-card { border-top: 1px solid #111827; padding-top: 8px; }
-    .sign-name { font-size: 13px; font-weight: 600; }
-    .sign-role { font-size: 12px; color: #6b7280; margin-top: 3px; }
-    .footer { margin-top: 24px; font-size: 12px; color: #6b7280; }
-    @page { size: A4; margin: 18mm; }
-  </style>
-</head>
-<body>
-  <div class="sheet">
-    <h1>Profit and Loss Statement</h1>
-    <h2>${escapeHtml(reportStatementSubtitle)}</h2>
-
-    <div class="meta">
-      <div><span class="label">Business</span>${escapeHtml(businessName)}</div>
-      <div><span class="label">Prepared For</span>${escapeHtml(ownerName)}</div>
-      <div><span class="label">Reporting Period</span>${escapeHtml(reportPeriodLabel)}</div>
-      <div><span class="label">Statement Basis</span>${escapeHtml(reportMode === 'yearly' ? 'Annual Management Statement' : 'Monthly Management Statement')}</div>
-      <div><span class="label">Prepared By</span>${escapeHtml(statementPreparedBy)}</div>
-      <div><span class="label">Prepared On</span>${escapeHtml(preparedOn)}</div>
-    </div>
-
-    <div class="section">Income</div>
-    <table>
-      <thead>
-        <tr><th>Account</th><th class="amount">Amount (${escapeHtml(activeCurrencyCode)})</th></tr>
-      </thead>
-      <tbody>
-        ${incomeRows}
-      </tbody>
-      <tbody class="totals">
-        <tr><td>Total Income</td><td class="amount">${formatCurrency(activeReportSummary.totalRevenue)}</td></tr>
-      </tbody>
-    </table>
-
-    <div class="section">Less: Business Expenses</div>
-    <table>
-      <thead>
-        <tr><th>Account</th><th class="amount">Amount (${escapeHtml(activeCurrencyCode)})</th></tr>
-      </thead>
-      <tbody>
-        ${expenseRows}
-      </tbody>
-      <tbody class="totals">
-        <tr><td>Total Expenses</td><td class="amount">${formatCurrency(activeReportSummary.totalExpenses)}</td></tr>
-      </tbody>
-    </table>
-
-    <table>
-      <tbody class="totals">
-        <tr class="net-profit"><td>Net Profit / (Loss)</td><td class="amount">${formatCurrency(activeReportSummary.profit)}</td></tr>
-        <tr><td>Net Margin</td><td class="amount">${activeReportSummary.totalRevenue > 0 ? `${netMargin.toFixed(1)}%` : 'N/A'}</td></tr>
-      </tbody>
-    </table>
-
-    <div class="review">
-      <span class="label">Accountant Review Note</span>
-      ${escapeHtml(accountantReviewNote)}
-    </div>
-
-    <div class="sign-grid">
-      <div class="sign-card">
-        <div class="sign-name">${escapeHtml(statementPreparedBy)}</div>
-        <div class="sign-role">Prepared by</div>
-      </div>
-      <div class="sign-card">
-        <div class="sign-name">${escapeHtml(ownerName)}</div>
-        <div class="sign-role">Reviewed/Approved by</div>
-      </div>
-    </div>
-
-    <p class="footer">Generated by Akonta AI accounting workflow engine for ${escapeHtml(reportPeriodLabel)}. ${escapeHtml(appCopyrightNotice)}</p>
-  </div>
-</body>
-</html>
-    `.trim();
+  const cashFlowStatementParams = {
+    user,
+    reportPeriodLabel,
+    reportStatementSubtitle,
+    activeCurrencyCode,
+    statementPreparedBy,
+    appCopyrightNotice,
+    cashFlowLineItems,
+    activeReportSummary
   };
 
   const handlePrintProfitLoss = () => {
-    const statementHtml = buildProfitLossStatementHtml();
-    const blob = new Blob([statementHtml], { type: 'text/html;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const iframe = document.createElement('iframe');
-    iframe.style.position = 'fixed';
-    iframe.style.right = '0';
-    iframe.style.bottom = '0';
-    iframe.style.width = '0';
-    iframe.style.height = '0';
-    iframe.style.border = '0';
-
-    const cleanup = () => {
-      URL.revokeObjectURL(url);
-      iframe.remove();
-    };
-
-    iframe.onload = () => {
-      const frameWindow = iframe.contentWindow;
-      if (!frameWindow) {
-        cleanup();
-        return;
-      }
-
-      frameWindow.onafterprint = cleanup;
-      frameWindow.focus();
-      setTimeout(() => {
-        frameWindow.print();
-        setTimeout(cleanup, 1500);
-      }, 80);
-    };
-
-    iframe.src = url;
-    document.body.appendChild(iframe);
+    const statementHtml = buildProfitLossStatementHtml(profitLossStatementParams);
+    printStatementHtml(statementHtml);
   };
 
   const handleDownloadProfitLoss = async () => {
     try {
-      const { jsPDF } = await import('jspdf');
-      const doc = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' });
-      const pageWidth = doc.internal.pageSize.getWidth();
-      const pageHeight = doc.internal.pageSize.getHeight();
-      const margin = 48;
-      const rightEdge = pageWidth - margin;
-      let cursorY = margin;
-
-      const ensureSpace = (heightNeeded: number) => {
-        if (cursorY + heightNeeded <= pageHeight - margin) return;
-        doc.addPage();
-        cursorY = margin;
-      };
-
-      const drawRows = (rows: Array<{ label: string; amount: number }>, labelIndent = 0) => {
-        rows.forEach((row) => {
-          const wrappedLabel = doc.splitTextToSize(row.label, rightEdge - (margin + labelIndent) - 130);
-          const rowHeight = Math.max(14, wrappedLabel.length * 12);
-          ensureSpace(rowHeight + 4);
-          doc.setFont('times', 'normal');
-          doc.setFontSize(10);
-          doc.text(wrappedLabel, margin + labelIndent, cursorY);
-          doc.text(formatCurrency(row.amount), rightEdge, cursorY, { align: 'right' });
-          cursorY += rowHeight;
-        });
-      };
-
-      const renderSection = (
-        title: string,
-        rows: Array<{ label: string; amount: number }>,
-        emptyLabel: string,
-        totalLabel: string,
-        totalAmount: number,
-        options?: { indentRows?: boolean }
-      ) => {
-        ensureSpace(54);
-        doc.setFont('times', 'bold');
-        doc.setFontSize(11);
-        doc.text(title.toUpperCase(), margin, cursorY);
-        cursorY += 10;
-        doc.line(margin, cursorY, rightEdge, cursorY);
-        cursorY += 16;
-        drawRows(rows.length > 0 ? rows : [{ label: emptyLabel, amount: 0 }], options?.indentRows ? 16 : 0);
-        ensureSpace(22);
-        doc.line(margin, cursorY, rightEdge, cursorY);
-        cursorY += 14;
-        doc.setFont('times', 'bold');
-        doc.text(totalLabel, margin, cursorY);
-        doc.text(formatCurrency(totalAmount), rightEdge, cursorY, { align: 'right' });
-        cursorY += 24;
-      };
-
-      doc.setFont('times', 'bold');
-      doc.setFontSize(24);
-      doc.text('Profit and Loss Statement', margin, cursorY);
-      cursorY += 26;
-
-      doc.setFont('times', 'normal');
-      doc.setFontSize(12);
-      doc.text(reportStatementSubtitle, margin, cursorY);
-      cursorY += 24;
-
-      const metadata: Array<[string, string]> = [
-        ['Business', user?.businessName || 'Akonta AI Business'],
-        ['Prepared For', user?.name || 'Business Owner'],
-        ['Reporting Period', reportPeriodLabel],
-        ['Statement Basis', reportMode === 'yearly' ? 'Annual Management Statement' : 'Monthly Management Statement'],
-        ['Prepared By', statementPreparedBy],
-        ['Prepared On', new Date().toLocaleDateString('en-GH', { month: 'long', day: 'numeric', year: 'numeric' })]
-      ];
-
-      metadata.forEach(([label, value]) => {
-        ensureSpace(20);
-        doc.setFont('times', 'bold');
-        doc.setFontSize(10);
-        doc.text(`${label}:`, margin, cursorY);
-        doc.setFont('times', 'normal');
-        const wrapped = doc.splitTextToSize(value, rightEdge - (margin + 115));
-        doc.text(wrapped, margin + 115, cursorY);
-        cursorY += Math.max(16, wrapped.length * 12);
+      await generateProfitLossPdf({
+        ...profitLossStatementParams,
+        statementBusinessKey,
+        statementPeriodKey
       });
-
-      cursorY += 8;
-      renderSection('Income', incomeLines, 'No income recorded', 'Total Income', activeReportSummary.totalRevenue);
-      renderSection(
-        'Less: Business Expenses',
-        expenseLines,
-        'No expenses recorded',
-        'Total Expenses',
-        activeReportSummary.totalExpenses,
-        { indentRows: true }
-      );
-
-      ensureSpace(30);
-      doc.line(margin, cursorY, rightEdge, cursorY);
-      cursorY += 14;
-      doc.setFont('times', 'bold');
-      doc.setFontSize(11);
-      doc.text('Net Profit / (Loss)', margin, cursorY);
-      doc.text(formatCurrency(activeReportSummary.profit), rightEdge, cursorY, { align: 'right' });
-      cursorY += 16;
-      doc.setFont('times', 'normal');
-      doc.setFontSize(10);
-      doc.text(`Net Margin: ${activeReportSummary.totalRevenue > 0 ? `${netMargin.toFixed(1)}%` : 'N/A'}`, margin, cursorY);
-      cursorY += 24;
-
-      ensureSpace(58);
-      doc.setFont('times', 'bold');
-      doc.setFontSize(10);
-      doc.text('Accountant Review Note', margin, cursorY);
-      cursorY += 14;
-      doc.setFont('times', 'normal');
-      const reviewLines = doc.splitTextToSize(accountantReviewNote, rightEdge - margin);
-      doc.text(reviewLines, margin, cursorY);
-      cursorY += Math.max(20, reviewLines.length * 12 + 10);
-
-      ensureSpace(22);
-      doc.setFontSize(9);
-      doc.setTextColor(107, 114, 128);
-      const footerText = `Generated by Akonta AI accounting workflow engine for ${reportPeriodLabel}. ${appCopyrightNotice}`;
-      const footerLines = doc.splitTextToSize(footerText, rightEdge - margin);
-      doc.text(footerLines, margin, cursorY);
-      doc.setTextColor(17, 24, 39);
-
-      doc.save(`${statementBusinessKey}-profit-loss-${statementPeriodKey}.pdf`);
     } catch (error) {
       console.error('Unable to generate PDF statement. Falling back to print.', error);
       handlePrintProfitLoss();
     }
+  };
+
+  const handleDownloadProfitLossCsv = () => {
+    const businessName = user?.businessName || 'Akonta AI Business';
+    const rows = buildProfitLossCsvRows({
+      reportPeriodLabel,
+      businessName,
+      reportStatementSubtitle,
+      activeCurrencyCode,
+      activeReportSummary,
+      incomeLines,
+      directExpenseLines,
+      indirectExpenseLines,
+      netMargin
+    });
+    downloadCsvFile(`${statementBusinessKey}-profit-loss-${statementPeriodKey}.csv`, rows);
+  };
+
+  const handlePrintCashFlow = () => {
+    const statementHtml = buildCashFlowStatementHtml(cashFlowStatementParams);
+    printStatementHtml(statementHtml);
+  };
+
+  const handleDownloadCashFlow = async () => {
+    try {
+      await generateCashFlowPdf({
+        ...cashFlowStatementParams,
+        statementBusinessKey,
+        statementPeriodKey
+      });
+    } catch (error) {
+      console.error('Unable to generate cash flow PDF statement. Falling back to print.', error);
+      handlePrintCashFlow();
+    }
+  };
+
+  const handleDownloadCashFlowCsv = () => {
+    const businessName = user?.businessName || 'Akonta AI Business';
+    const rows = buildCashFlowCsvRows({
+      reportPeriodLabel,
+      businessName,
+      reportStatementSubtitle,
+      activeCurrencyCode,
+      activeReportSummary,
+      cashFlowLineItems
+    });
+    downloadCsvFile(`${statementBusinessKey}-cash-flow-${statementPeriodKey}.csv`, rows);
   };
 
   const adjustReportMonth = (delta: number) => {
@@ -773,8 +784,7 @@ export default function App() {
     if (!user) return;
     setIsReferralLoading(true);
     try {
-      const referral = await getReferralProgress(user.id);
-      setReferralProgress(referral);
+      await referralProgressQuery.refetch();
     } catch (error) {
       console.error('Unable to refresh referral progress', error);
     } finally {
@@ -782,16 +792,224 @@ export default function App() {
     }
   };
 
-  const copyReferralLink = async () => {
-    if (!referralProgress?.referralLink) return;
+  const copyReferralLink = useCallback(async () => {
+    if (!effectiveReferralLink) return;
     try {
-      await navigator.clipboard.writeText(referralProgress.referralLink);
+      await navigator.clipboard.writeText(effectiveReferralLink);
       setReferralCopyMessage('Referral link copied.');
     } catch {
       setReferralCopyMessage('Unable to copy automatically. Please copy it manually.');
     }
     setTimeout(() => setReferralCopyMessage(null), 2400);
-  };
+  }, [effectiveReferralLink]);
+
+  const refreshPendingSyncCount = useCallback(async (userId: string) => {
+    try {
+      const count = await getPendingChatCount(userId);
+      setPendingSyncCount(count);
+      return count;
+    } catch (error) {
+      console.error('Unable to read offline queue count', error);
+      return 0;
+    }
+  }, []);
+
+  const applyChatEntryResult = useCallback(async (
+    result: ChatEntryResult,
+    options?: { fromOutbox?: boolean }
+  ) => {
+    setFollowUpStep(null);
+
+    if (user?.id) {
+      queryClient.setQueryData<Transaction[]>(['transactions', user.id], (previous = []) => {
+        const merged = new Map(previous.map((tx) => [tx.id, tx]));
+        for (const tx of result.transactions) {
+          merged.set(tx.id, tx);
+        }
+        return Array.from(merged.values()).sort(
+          (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
+        );
+      });
+
+      queryClient.setQueryData(
+        ['weekly-summary', user.id, currentPeriodContext.weekStart, currentPeriodContext.weekEnd],
+        {
+          periodType: 'weekly',
+          periodStart: currentPeriodContext.weekStart,
+          periodEnd: currentPeriodContext.weekEnd,
+          summary: result.summary
+        }
+      );
+      queryClient.setQueryData(
+        ['monthly-summary', user.id, currentPeriodContext.currentYear, currentPeriodContext.currentMonth],
+        {
+          periodType: 'monthly',
+          periodStart: `${currentPeriodContext.currentYear}-${String(currentPeriodContext.currentMonth).padStart(2, '0')}-01`,
+          periodEnd: `${currentPeriodContext.currentYear}-${String(currentPeriodContext.currentMonth).padStart(2, '0')}-${String(
+            new Date(Date.UTC(currentPeriodContext.currentYear, currentPeriodContext.currentMonth, 0)).getUTCDate()
+          ).padStart(2, '0')}`,
+          summary: result.monthlySummary
+        }
+      );
+
+      const currentKey = `${currentPeriodContext.currentYear}-${String(currentPeriodContext.currentMonth).padStart(2, '0')}`;
+      setReportSummaryCache((prev) => ({ ...prev, [currentKey]: result.monthlySummary }));
+
+      try {
+        const latestInsights = await getCurrentInsights(user.id);
+        queryClient.setQueryData(
+          ['current-insights', user.id, currentPeriodContext.currentYear, currentPeriodContext.currentMonth],
+          latestInsights
+        );
+        setReportInsightsCache((prev) => ({ ...prev, [currentKey]: latestInsights }));
+      } catch (insightError) {
+        console.error('Unable to refresh current insights after chat update', insightError);
+      }
+    }
+
+    let botText = result.botReply;
+    if (result.budgetStatuses.length > 0) {
+      const expenseBudget = result.budgetStatuses.find((status) => status.budget.targetType === 'expense');
+      if (expenseBudget) {
+        if (expenseBudget.status === 'overBudget') {
+          botText += `\n\nExpense alert: you are over budget by ${formatCurrency(Math.abs(expenseBudget.remaining))}.`;
+        } else if (expenseBudget.status === 'nearTarget') {
+          botText += `\n\nExpense watch: you have used ${Math.round(expenseBudget.percentUsed)}% of your budget.`;
+        }
+      }
+    }
+
+    if (options?.fromOutbox) {
+      botText = `Synced pending entry.\n${botText}`;
+    }
+
+    const botResponse: ChatMessage = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      type: 'bot',
+      content: botText,
+      timestamp: new Date()
+    };
+
+    setMessages((prev) => [...prev, botResponse]);
+
+    if (user?.id) {
+      invalidateUserDataQueries(user.id);
+    }
+  }, [currentPeriodContext.currentMonth, currentPeriodContext.currentYear, currentPeriodContext.weekEnd, currentPeriodContext.weekStart, formatCurrency, invalidateUserDataQueries, queryClient, user?.id]);
+
+  const flushPendingChatOutbox = useCallback(async () => {
+    if (!user || !navigator.onLine || isOutboxSyncing) return;
+
+    setIsOutboxSyncing(true);
+    try {
+      const queued = await listPendingChatMessages(user.id);
+      if (queued.length === 0) {
+        setPendingSyncCount(0);
+        return;
+      }
+
+      for (const item of queued) {
+        try {
+          const result = await postChatEntryMutation.mutateAsync({
+            userId: user.id,
+            message: item.message,
+            channel: item.channel
+          });
+          await removePendingChatMessage(item.id);
+          setMessages((prev) => prev.map((msg) => (
+            msg.id === item.clientMessageId
+              ? { ...msg, syncStatus: 'synced' }
+              : msg
+          )));
+          await applyChatEntryResult(result, { fromOutbox: true });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          await markPendingChatMessageFailure(item.id, reason);
+          if (isOfflineSyncError(error)) {
+            break;
+          }
+          setMessages((prev) => prev.map((msg) => (
+            msg.id === item.clientMessageId
+              ? { ...msg, syncStatus: 'failed' }
+              : msg
+          )));
+        }
+      }
+    } finally {
+      await refreshPendingSyncCount(user.id);
+      setIsOutboxSyncing(false);
+    }
+  }, [applyChatEntryResult, isOutboxSyncing, postChatEntryMutation, refreshPendingSyncCount, user]);
+
+  const submitChatMessage = useCallback(async (message: string) => {
+    if (!user) {
+      setError('Please complete onboarding before sending messages.');
+      return;
+    }
+
+    const clientMessageId = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const userMessage: ChatMessage = {
+      id: clientMessageId,
+      type: 'user',
+      content: message,
+      timestamp: new Date(),
+      syncStatus: 'synced'
+    };
+    setMessages((prev) => [...prev, userMessage]);
+    setError(null);
+
+    try {
+      const result = await postChatEntryMutation.mutateAsync({
+        userId: user.id,
+        message,
+        channel: 'web'
+      });
+      await applyChatEntryResult(result);
+    } catch (error) {
+      if (isOfflineSyncError(error)) {
+        setMessages((prev) => prev.map((msg) => (
+          msg.id === clientMessageId
+            ? { ...msg, syncStatus: 'pending' }
+            : msg
+        )));
+        try {
+          await enqueuePendingChatMessage({
+            userId: user.id,
+            clientMessageId,
+            message,
+            channel: 'web'
+          });
+          await refreshPendingSyncCount(user.id);
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              type: 'bot',
+              content: 'Captured offline. I will sync this entry automatically once your internet is back.',
+              timestamp: new Date()
+            }
+          ]);
+          return;
+        } catch (queueError) {
+          console.error('Unable to queue offline message', queueError);
+          setMessages((prev) => prev.map((msg) => (
+            msg.id === clientMessageId
+              ? { ...msg, syncStatus: 'failed' }
+              : msg
+          )));
+        }
+      }
+
+      console.error(error);
+      const errorResponse: ChatMessage = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        type: 'bot',
+        content: "I couldn't save that entry right now. Please try again in a moment.",
+        timestamp: new Date()
+      };
+      setMessages((prev) => [...prev, errorResponse]);
+    }
+  }, [applyChatEntryResult, postChatEntryMutation, refreshPendingSyncCount, user]);
 
   const heroSlides = [
     {
@@ -810,75 +1028,6 @@ export default function App() {
         Demo mode active — web chat works locally while backend / WhatsApp configuration is pending.
       </div>
     ) : null;
-
-  const premiumInsightCards: PremiumInsight[] = currentInsights
-    ? [
-        currentInsights.targetStatus.revenueGapToDate === undefined
-          ? {
-              id: 'target-missing',
-              type: 'recommendation',
-              title: 'Set revenue targets',
-              message: 'Add monthly revenue and expense targets in Settings so Akonta AI can track your pace.',
-              icon: '🎯'
-            }
-          : currentInsights.targetStatus.revenueStatus === 'behind'
-            ? {
-                id: 'target-behind',
-                type: 'warning',
-                title: 'Revenue behind target pace',
-                message: `You are behind by ${formatCurrency(Math.abs(currentInsights.targetStatus.revenueGapToDate))} month-to-date.`,
-                icon: '⚠️'
-              }
-            : {
-                id: 'target-on-track',
-                type: 'insight',
-                title: 'Revenue pace is healthy',
-                message: currentInsights.targetStatus.revenueStatus === 'ahead'
-                  ? `You are ahead of pace by ${formatCurrency(currentInsights.targetStatus.revenueGapToDate ?? 0)}.`
-                  : 'You are tracking close to your target pace this month.',
-                icon: '📈'
-              },
-        currentInsights.expenseOverrun.isOverrun
-          ? {
-              id: 'expense-overrun',
-              type: 'warning',
-              title: 'Expense pace needs attention',
-              message: currentInsights.expenseOverrun.varianceByNow !== undefined && currentInsights.expenseOverrun.varianceByNow > 0
-                ? `Expenses are above expected pace by ${formatCurrency(currentInsights.expenseOverrun.varianceByNow)}.`
-                : 'One or more categories are running above budget.',
-              icon: '💸'
-            }
-          : {
-              id: 'expense-ok',
-              type: 'insight',
-              title: 'Expense control is stable',
-              message: 'Your expenses are within expected monthly pace so far.',
-              icon: '✅'
-            },
-        {
-          id: 'credit-readiness',
-          type: currentInsights.creditReadiness.level === 'poor' || currentInsights.creditReadiness.level === 'fair'
-            ? 'recommendation'
-            : 'insight',
-          title: `Credit readiness: ${currentInsights.creditReadiness.score}/100`,
-          message: currentInsights.creditReadiness.level === 'strong'
-            ? 'Your records look lender-ready. Keep this consistency.'
-            : 'Keep daily records complete and categorized to improve loan readiness.',
-          icon: currentInsights.creditReadiness.level === 'strong' ? '🏦' : '🧾'
-        },
-        {
-          id: 'top-highlight',
-          type: 'insight',
-          title: 'Accountant note',
-          message: currentInsights.highlights[0] ?? 'Your records are on track this month.',
-          icon: '🧠'
-        }
-      ]
-    : premiumInsights;
-
-  const premiumExpenseCategories = currentInsights?.expenseOverrun.topExpenseCategories?.length
-    ? currentInsights.expenseOverrun.topExpenseCategories
-    : dashboardTopExpenseCategories;
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -908,6 +1057,36 @@ export default function App() {
       window.localStorage.removeItem('akontaai-user');
     }
   }, [user]);
+
+  useEffect(() => {
+    if (!user) {
+      setPendingSyncCount(0);
+      return;
+    }
+
+    let cancelled = false;
+    const bootstrapQueue = async () => {
+      const pending = await refreshPendingSyncCount(user.id);
+      if (!cancelled && pending > 0 && navigator.onLine) {
+        await flushPendingChatOutbox();
+      }
+    };
+
+    void bootstrapQueue();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [flushPendingChatOutbox, refreshPendingSyncCount, user]);
+
+  useEffect(() => {
+    if (!user) return;
+    const handleOnline = () => {
+      void flushPendingChatOutbox();
+    };
+    window.addEventListener('online', handleOnline);
+    return () => window.removeEventListener('online', handleOnline);
+  }, [flushPendingChatOutbox, user]);
 
   useEffect(() => {
     const current = (user?.currencyCode ?? 'GHS').toUpperCase();
@@ -971,10 +1150,7 @@ export default function App() {
   }, [heroSlides.length]);
 
   useEffect(() => {
-    if (!user) {
-      setCurrentInsights(null);
-      return;
-    }
+    if (!user) return;
 
     const cachedMessages = window.localStorage.getItem(`akontaai-chat-${user.id}`);
     if (cachedMessages) {
@@ -985,42 +1161,73 @@ export default function App() {
         console.error('Unable to restore chat messages', error);
       }
     }
+  }, [user]);
 
-    const loadAppData = async () => {
+  useEffect(() => {
+    if (monthlySummaryQuery.data?.summary) {
+      setReportSummaryCache((prev) => ({ ...prev, [currentPeriodContext.currentKey]: monthlySummaryQuery.data.summary }));
+    }
+  }, [currentPeriodContext.currentKey, monthlySummaryQuery.data?.summary]);
+
+  useEffect(() => {
+    if (currentInsightsQuery.data) {
+      setReportInsightsCache((prev) => ({ ...prev, [currentPeriodContext.currentKey]: currentInsightsQuery.data }));
+    }
+  }, [currentInsightsQuery.data, currentPeriodContext.currentKey]);
+
+  useEffect(() => {
+    if (transactionsQuery.error) {
+      console.error('Failed to load transactions', transactionsQuery.error);
+    }
+    if (weeklySummaryQuery.error) {
+      console.error('Failed to load weekly summary', weeklySummaryQuery.error);
+    }
+    if (monthlySummaryQuery.error) {
+      console.error('Failed to load monthly summary', monthlySummaryQuery.error);
+    }
+    if (currentInsightsQuery.error) {
+      console.error('Failed to load current insights', currentInsightsQuery.error);
+    }
+    if (referralProgressQuery.error) {
+      console.error('Failed to load referral progress', referralProgressQuery.error);
+    }
+  }, [currentInsightsQuery.error, monthlySummaryQuery.error, referralProgressQuery.error, transactionsQuery.error, weeklySummaryQuery.error]);
+
+  useEffect(() => {
+    if (!user) return;
+    const params = new URLSearchParams(window.location.search);
+    const reference = params.get('reference') || params.get('trxref');
+    if (!reference) return;
+
+    let cancelled = false;
+    const finalizePayment = async () => {
       try {
-        const now = new Date();
-        const weekStart = new Date(now);
-        weekStart.setDate(now.getDate() - 6);
-        weekStart.setHours(0, 0, 0, 0);
-        const weekEnd = new Date(now);
-        weekEnd.setHours(23, 59, 59, 999);
-
-        const [txs, weekly, monthly, insights, referral] = await Promise.all([
-          getTransactions(user.id),
-          getWeeklySummary(
-            user.id,
-            weekStart.toISOString().slice(0, 10),
-            weekEnd.toISOString().slice(0, 10)
-          ),
-          getMonthlySummary(user.id, now.getUTCFullYear(), now.getUTCMonth() + 1),
-          getCurrentInsights(user.id),
-          getReferralProgress(user.id)
-        ]);
-
-        setTransactions(txs);
-        setWeeklySummary(weekly.summary);
-        setMonthlySummary(monthly.summary);
-        setCurrentInsights(insights);
-        setReferralProgress(referral);
-        const currentKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
-        setReportSummaryCache((prev) => ({ ...prev, [currentKey]: monthly.summary }));
-        setReportInsightsCache((prev) => ({ ...prev, [currentKey]: insights }));
-      } catch (err) {
-        console.error('Failed to load app data', err);
+        const result = await verifySubscriptionMutation.mutateAsync(reference);
+        if (cancelled) return;
+        if (result.user) {
+          setUser(result.user);
+        }
+        if (result.status === 'success') {
+          setSettingsNotice('Subscription payment confirmed. Premium is now active.');
+        } else {
+          setError('Payment verification did not return success yet. Please try again in a moment.');
+        }
+      } catch (paymentError) {
+        console.error('Unable to verify payment', paymentError);
+        if (!cancelled) {
+          setError('Unable to verify payment right now.');
+        }
+      } finally {
+        const cleanUrl = `${window.location.pathname}${window.location.hash}`;
+        window.history.replaceState({}, '', cleanUrl);
       }
     };
 
-    loadAppData();
+    void finalizePayment();
+
+    return () => {
+      cancelled = true;
+    };
   }, [user]);
 
   useEffect(() => {
@@ -1029,104 +1236,85 @@ export default function App() {
       setSelectedReportInsights(null);
       return;
     }
+    if (reportMode === 'yearly') {
+      setSelectedReportSummary(null);
+      setSelectedReportInsights(null);
+      return;
+    }
+    const selectedKey = `${selectedReportYear}-${String(selectedReportMonth).padStart(2, '0')}`;
+    setSelectedReportSummary(reportSummaryCache[selectedKey] ?? null);
+    setSelectedReportInsights(reportInsightsCache[selectedKey] ?? null);
+  }, [reportInsightsCache, reportMode, reportSummaryCache, selectedReportMonth, selectedReportYear, user]);
 
-    let cancelled = false;
+  useEffect(() => {
+    if (!selectedReportDataQuery.data || reportMode !== 'monthly') return;
+    const selectedKey = `${selectedReportYear}-${String(selectedReportMonth).padStart(2, '0')}`;
+    setSelectedReportSummary(selectedReportDataQuery.data.monthly.summary);
+    setSelectedReportInsights(selectedReportDataQuery.data.insights);
+    setReportSummaryCache((prev) => ({ ...prev, [selectedKey]: selectedReportDataQuery.data.monthly.summary }));
+    setReportInsightsCache((prev) => ({ ...prev, [selectedKey]: selectedReportDataQuery.data.insights }));
+  }, [reportMode, selectedReportDataQuery.data, selectedReportMonth, selectedReportYear]);
 
-    const loadReportSummary = async () => {
-      if (reportMode === 'yearly') {
-        setSelectedReportSummary(null);
-        setSelectedReportInsights(null);
-        return;
-      }
-      const selectedKey = `${selectedReportYear}-${String(selectedReportMonth).padStart(2, '0')}`;
-      setSelectedReportSummary(reportSummaryCache[selectedKey] ?? null);
-      setSelectedReportInsights(reportInsightsCache[selectedKey] ?? null);
-
-      try {
-        const [monthly, insights] = await Promise.all([
-          getMonthlySummary(user.id, selectedReportYear, selectedReportMonth),
-          getMonthlyInsights(user.id, selectedReportYear, selectedReportMonth)
-        ]);
-        if (!cancelled) {
-          setSelectedReportSummary(monthly.summary);
-          setSelectedReportInsights(insights);
-          setReportSummaryCache((prev) => ({ ...prev, [selectedKey]: monthly.summary }));
-          setReportInsightsCache((prev) => ({ ...prev, [selectedKey]: insights }));
-        }
-      } catch (err) {
-        console.error('Failed to load selected report summary', err);
-        if (!cancelled) {
-          if (!reportSummaryCache[selectedKey]) {
-            setSelectedReportSummary(null);
-          }
-          if (!reportInsightsCache[selectedKey]) {
-            setSelectedReportInsights(null);
-          }
-        }
-      }
-    };
-
-    loadReportSummary();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [user, reportMode, selectedReportYear, selectedReportMonth]);
+  useEffect(() => {
+    if (!selectedReportDataQuery.error || reportMode !== 'monthly') return;
+    const selectedKey = `${selectedReportYear}-${String(selectedReportMonth).padStart(2, '0')}`;
+    console.error('Failed to load selected report summary', selectedReportDataQuery.error);
+    if (!reportSummaryCache[selectedKey]) {
+      setSelectedReportSummary(null);
+    }
+    if (!reportInsightsCache[selectedKey]) {
+      setSelectedReportInsights(null);
+    }
+  }, [reportInsightsCache, reportMode, reportSummaryCache, selectedReportDataQuery.error, selectedReportMonth, selectedReportYear]);
 
   useEffect(() => {
     registerDemoModeListener(() => setIsDemoMode(true));
-
-    const loadBudgets = async () => {
-      if (!user) return;
-      try {
-        const currentBudgets = await getCurrentBudgets(user.id);
-        setBudgets(currentBudgets);
-        const expenseBudget = currentBudgets.find((budget) => budget.targetType === 'expense');
-        if (expenseBudget) {
-          setBudgetTargetType('expense');
-          setBudgetAmount(expenseBudget.amount.toString());
-        }
-      } catch (error) {
-        console.error('Unable to load current budgets', error);
-      }
-    };
-
-    loadBudgets();
-  }, [user]);
+  }, []);
 
   useEffect(() => {
-    if (!user?.isSuperAdmin) {
-      setAdminAnalytics(null);
-      setAdminProviderInfo(null);
+    if (!budgets.length) return;
+    const expenseBudget = budgets.find((budget) => budget.targetType === 'expense');
+    if (expenseBudget) {
+      setBudgetTargetType('expense');
+      setBudgetAmount(expenseBudget.amount.toString());
+    }
+  }, [budgets]);
+
+  useEffect(() => {
+    if (budgetsQuery.error) {
+      console.error('Unable to load current budgets', budgetsQuery.error);
+    }
+  }, [budgetsQuery.error]);
+
+  useEffect(() => {
+    if (!isSuperAdmin) {
+      setAdminWhatchimpDraft(null);
+      setAdminPaymentDraft(null);
+      setAdminError(null);
       return;
     }
+    if (adminProviderQuery.data && !adminWhatchimpDraft) {
+      setAdminWhatchimpDraft(adminProviderQuery.data.whatchimp);
+    }
+    if (adminPaymentSettingsQuery.data && !adminPaymentDraft) {
+      setAdminPaymentDraft(adminPaymentSettingsQuery.data);
+    }
+  }, [adminPaymentDraft, adminPaymentSettingsQuery.data, adminProviderQuery.data, adminWhatchimpDraft, isSuperAdmin]);
 
-    let cancelled = false;
-    const loadAdminData = async () => {
-      try {
-        const [analytics, provider] = await Promise.all([
-          getAdminAnalytics(),
-          getAdminWhatsAppProvider()
-        ]);
-        if (!cancelled) {
-          setAdminAnalytics(analytics);
-          setAdminProviderInfo(provider);
-          setAdminError(null);
-        }
-      } catch (error) {
-        console.error('Unable to load admin data', error);
-        if (!cancelled) {
-          setAdminError('Unable to load admin analytics right now.');
-        }
-      }
-    };
+  useEffect(() => {
+    if (!isSuperAdmin) return;
+    const failed = adminAnalyticsQuery.error || adminProviderQuery.error || adminPaymentSettingsQuery.error;
+    if (!failed) return;
+    console.error('Unable to load admin data', failed);
+    setAdminError('Unable to load admin analytics right now.');
+  }, [adminAnalyticsQuery.error, adminPaymentSettingsQuery.error, adminProviderQuery.error, isSuperAdmin]);
 
-    loadAdminData();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [user]);
+  useEffect(() => {
+    if (!isSuperAdmin) return;
+    if (adminAnalyticsQuery.isSuccess && adminProviderQuery.isSuccess && adminPaymentSettingsQuery.isSuccess) {
+      setAdminError(null);
+    }
+  }, [adminAnalyticsQuery.isSuccess, adminPaymentSettingsQuery.isSuccess, adminProviderQuery.isSuccess, isSuperAdmin]);
 
   useEffect(() => {
     if (user) {
@@ -1142,326 +1330,30 @@ export default function App() {
 
   useEffect(() => {
     if (view === 'reports') {
-      setDashboardTab('reports');
+      if (hasReportAccess) {
+        setDashboardTab('reports');
+      } else {
+        setDashboardTab('overview');
+        setReportLockNotice('Reports are locked. Subscribe to regain access.');
+      }
       setView('dashboard');
     }
-  }, [view]);
+  }, [view, hasReportAccess]);
 
-  // Landing Page
+  useEffect(() => {
+    if (!hasReportAccess && dashboardTab === 'reports') {
+      setDashboardTab('overview');
+    }
+  }, [dashboardTab, hasReportAccess]);
+
+  useEffect(() => {
+    if (hasReportAccess) {
+      setReportLockNotice(null);
+    }
+  }, [hasReportAccess]);
+
   if (view === 'landing') {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-green-50 via-white to-emerald-50">
-        {/* Header */}
-        <header className="px-4 py-6">
-          <div className="max-w-6xl mx-auto flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <img src={brandLogoSrc} alt="Akonta AI logo" className="h-10 w-auto object-contain" />
-              <span className="text-xl font-bold text-gray-900">Akonta AI</span>
-            </div>
-            <button 
-              onClick={() => setView('onboarding')}
-              className="px-4 py-2 bg-green-500 text-white rounded-full font-medium hover:bg-green-600 transition-colors"
-            >
-              Get Started
-            </button>
-          </div>
-        </header>
-
-        {/* Hero */}
-        <main className="px-4 pt-12 pb-20">
-          <div className="max-w-6xl mx-auto">
-            <div className="text-center max-w-3xl mx-auto">
-              <div className="inline-flex items-center gap-2 bg-green-100 text-green-700 px-4 py-2 rounded-full text-sm font-medium mb-6">
-                <WhatsAppIcon size={16} className="text-green-600" />
-                Web Chat + WhatsApp
-              </div>
-
-              <div className="relative mb-8 overflow-hidden rounded-[2rem] border border-green-100 bg-white/80 p-8 shadow-2xl shadow-green-100">
-                <div className="flex flex-col items-center justify-center gap-3 text-center">
-                  <p className="text-3xl md:text-4xl font-semibold text-gray-900">{heroSlides[heroSlide].title}</p>
-                  <p className="text-4xl md:text-5xl font-bold text-green-600">{heroSlides[heroSlide].subtitle}</p>
-                  <p className="max-w-2xl text-base md:text-lg text-gray-600 leading-relaxed">
-                    No complex spreadsheets. No accounting jargon. Just chat to track your business finances, get insights, and grow your business.
-                  </p>
-                </div>
-
-                <div className="mt-6 flex justify-center gap-2">
-                  {heroSlides.map((_, index) => (
-                    <button
-                      key={index}
-                      onClick={() => setHeroSlide(index)}
-                      className={`h-2.5 w-2.5 rounded-full transition-all ${
-                        heroSlide === index ? 'bg-green-600 w-8' : 'bg-gray-200 w-2.5'
-                      }`}
-                      aria-label={`Slide ${index + 1}`}
-                    />
-                  ))}
-                </div>
-              </div>
-
-              <div className="flex flex-col sm:flex-row gap-4 justify-center mb-12">
-                <button 
-                  onClick={() => setView('onboarding')}
-                  className="px-8 py-4 bg-green-500 text-white rounded-2xl font-semibold text-lg hover:bg-green-600 transition-all shadow-lg shadow-green-200 flex items-center justify-center gap-2"
-                >
-                  <WhatsAppIcon size={20} />
-                  Get Started
-                </button>
-                <button 
-                  onClick={() => setView('dashboard')}
-                  className="px-8 py-4 bg-white text-gray-700 rounded-2xl font-semibold text-lg hover:bg-gray-50 transition-all border border-gray-200"
-                >
-                  View Demo
-                </button>
-              </div>
-            </div>
-
-            {/* Chat + P&L Preview */}
-            <div className="mx-auto mt-2 grid max-w-5xl gap-6 lg:grid-cols-2">
-              <div className="bg-white rounded-3xl shadow-2xl shadow-gray-200 overflow-hidden border border-gray-100">
-                <div className="bg-green-600 px-4 py-3 flex items-center gap-3">
-                  <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center p-1.5">
-                    <img src={brandMarkSrc} alt="Akonta AI logo mark" className="h-full w-full object-contain" />
-                  </div>
-                  <div>
-                    <p className="text-white font-semibold">Akonta AI Chatflow</p>
-                    <p className="text-green-100 text-xs">Online</p>
-                  </div>
-                </div>
-                <div className="p-4 space-y-3 bg-gray-50 min-h-[300px]">
-                  <div className="flex justify-start">
-                    <div className="bg-white rounded-2xl rounded-tl-sm px-4 py-2 shadow-sm max-w-[80%]">
-                      <p className="text-gray-800">Good morning! ☀️ How much money inflow came in today?</p>
-                    </div>
-                  </div>
-                  <div className="flex justify-end">
-                    <div className="bg-green-500 rounded-2xl rounded-tr-sm px-4 py-2 shadow-sm max-w-[80%]">
-                      <p className="text-white">I made 4500</p>
-                    </div>
-                  </div>
-                  <div className="flex justify-start">
-                    <div className="bg-white rounded-2xl rounded-tl-sm px-4 py-2 shadow-sm max-w-[80%]">
-                      <p className="text-gray-800">Recorded draft inflow: GHS 4500. What type was this? Reply with 1-6.</p>
-                    </div>
-                  </div>
-                  <div className="flex justify-end">
-                    <div className="bg-green-500 rounded-2xl rounded-tr-sm px-4 py-2 shadow-sm max-w-[80%]">
-                      <p className="text-white">2</p>
-                    </div>
-                  </div>
-                  <div className="flex justify-start">
-                    <div className="bg-white rounded-2xl rounded-tl-sm px-4 py-2 shadow-sm max-w-[80%]">
-                      <p className="text-gray-800">Saved. Entries are confirmed and your statement is updated.</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="bg-white rounded-3xl shadow-2xl shadow-gray-200 border border-gray-100 p-5">
-                <div className="mb-4">
-                  <p className="text-sm font-semibold text-gray-900">Profit & Loss Statement</p>
-                </div>
-
-                <div className="rounded-2xl border border-gray-200 overflow-hidden">
-                  <div className="bg-gray-50 border-b border-gray-200 px-4 py-3">
-                    <p className="text-sm font-semibold text-gray-900">Business Profit & Loss</p>
-                    <p className="text-xs text-gray-500">For the month ended April 2026</p>
-                  </div>
-
-                  <div className="px-4 py-3 space-y-3">
-                    <div>
-                      <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 mb-1">Income</p>
-                      <div className="space-y-1 text-sm">
-                        <div className="flex items-center justify-between"><span className="text-gray-700">Cash sales</span><span className="font-medium text-gray-900">GHS 4,500</span></div>
-                        <div className="flex items-center justify-between"><span className="text-gray-700">MoMo sales</span><span className="font-medium text-gray-900">GHS 1,800</span></div>
-                        <div className="flex items-center justify-between"><span className="text-gray-700">Debtor recovery</span><span className="font-medium text-gray-900">GHS 700</span></div>
-                      </div>
-                      <div className="mt-2 border-t border-dashed border-gray-300 pt-2 flex items-center justify-between text-sm font-semibold">
-                        <span>Total Income</span><span>GHS 7,000</span>
-                      </div>
-                    </div>
-
-                    <div className="border-t border-gray-200 pt-3">
-                      <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 mb-1">Less: Business Expenses</p>
-                      <div className="space-y-1 text-sm">
-                        <div className="flex items-center justify-between"><span className="pl-3 text-gray-700">Stock purchase</span><span className="font-medium text-gray-900">GHS 3,200</span></div>
-                        <div className="flex items-center justify-between"><span className="pl-3 text-gray-700">Operating expense</span><span className="font-medium text-gray-900">GHS 1,100</span></div>
-                        <div className="flex items-center justify-between"><span className="pl-3 text-gray-700">Owner withdrawal</span><span className="font-medium text-gray-900">GHS 650</span></div>
-                      </div>
-                      <div className="mt-2 border-t border-dashed border-gray-300 pt-2 flex items-center justify-between text-sm font-semibold">
-                        <span>Total Expenses</span><span>GHS 4,950</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="bg-green-50 border-t border-green-200 px-4 py-3 flex items-center justify-between">
-                    <span className="text-sm font-semibold text-gray-900">Net Profit</span>
-                    <span className="text-base font-bold text-green-700">GHS 2,050</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Features */}
-            <div className="grid md:grid-cols-3 gap-6 mt-20">
-              <div className="bg-white rounded-2xl p-6 shadow-lg shadow-gray-100 border border-gray-100">
-                <div className="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center mb-4">
-                  <ChatIcon className="text-green-600" size={24} />
-                </div>
-                <h3 className="text-lg font-semibold text-gray-900 mb-2">Chat to Track</h3>
-                <p className="text-gray-600">Log sales and expenses by simply messaging. Works with both web chat and WhatsApp.</p>
-              </div>
-              <div className="bg-white rounded-2xl p-6 shadow-lg shadow-gray-100 border border-gray-100">
-                <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center mb-4">
-                  <CalendarIcon className="text-blue-600" size={24} />
-                </div>
-                <h3 className="text-lg font-semibold text-gray-900 mb-2">Daily Reminders</h3>
-                <p className="text-gray-600">Never forget to log your numbers. Get friendly prompts at your preferred time.</p>
-              </div>
-              <div className="bg-white rounded-2xl p-6 shadow-lg shadow-gray-100 border border-gray-100">
-                <div className="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center mb-4">
-                  <ChartIcon className="text-purple-600" size={24} />
-                </div>
-                <h3 className="text-lg font-semibold text-gray-900 mb-2">Smart Insights</h3>
-                <p className="text-gray-600">Get weekly summaries and AI-powered recommendations for your business.</p>
-              </div>
-            </div>
-
-            {/* Pricing */}
-            <div className="mt-20 grid gap-6 md:grid-cols-2">
-              <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
-                <div className="flex items-center justify-between mb-4">
-                  <div>
-                    <p className="text-lg font-semibold text-gray-900">Free Plan</p>
-                    <p className="text-sm text-gray-500">Perfect for starting out.</p>
-                  </div>
-                </div>
-                <div className="py-8 text-center">
-                  <p className="text-5xl font-bold text-gray-900">¢0</p>
-                  <p className="text-sm text-gray-500">/mo</p>
-                </div>
-                <div className="space-y-3 mb-6 text-sm text-gray-600">
-                  <p>✅ Daily logging via WhatsApp</p>
-                  <p>✅ Weekly summaries</p>
-                  <p>✅ Monthly summaries</p>
-                </div>
-                <button
-                  onClick={() => setView('onboarding')}
-                  className="w-full py-4 rounded-2xl border border-green-500 text-green-600 font-semibold hover:bg-green-50 transition-colors"
-                >
-                  Get Started
-                </button>
-              </div>
-              <div className="bg-white rounded-3xl border border-green-500 p-6 shadow-sm">
-                <div className="flex items-center justify-between mb-4">
-                  <div>
-                    <p className="text-lg font-semibold text-gray-900">Premium Plan</p>
-                    <p className="text-sm text-gray-500">For growing businesses.</p>
-                  </div>
-                  <span className="rounded-full bg-green-500 px-3 py-1 text-xs font-semibold text-white">Most Popular</span>
-                </div>
-                <div className="py-8 text-center">
-                  <p className="text-5xl font-bold text-gray-900">¢50</p>
-                  <p className="text-sm text-gray-500">/mo</p>
-                </div>
-                <div className="space-y-3 mb-6 text-sm text-gray-600">
-                  <p>✅ Everything in Free</p>
-                  <p>✅ Advanced AI insights</p>
-                  <p>✅ Expense breakdown</p>
-                  <p>✅ Cash flow warnings</p>
-                  <p>✅ Downloadable PDF reports</p>
-                </div>
-                <button
-                  onClick={() => setView('onboarding')}
-                  className="w-full py-4 rounded-2xl bg-green-500 text-white font-semibold hover:bg-green-600 transition-colors"
-                >
-                  Start Free Trial
-                </button>
-              </div>
-            </div>
-
-            <div className="mt-10 grid gap-6 md:grid-cols-2">
-              <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
-                <h2 className="text-lg font-semibold text-gray-900 mb-4">Premium Insights Preview</h2>
-                <div className="space-y-3">
-                  {premiumInsightCards.slice(0, 3).map((insight) => (
-                    <div key={insight.id} className="rounded-xl border border-gray-100 bg-gray-50 p-4">
-                      <div className="flex items-start gap-3">
-                        <span className="text-xl">{insight.icon}</span>
-                        <div>
-                          <p className="font-semibold text-gray-900">{insight.title}</p>
-                          <p className="text-sm text-gray-600">{insight.message}</p>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
-                <h2 className="text-lg font-semibold text-gray-900 mb-4">Premium Expense Breakdown</h2>
-                <div className="space-y-3">
-                  {premiumExpenseCategories.slice(0, 5).map((cat, i) => {
-                    const percentage = activeMonthlySummary.totalExpenses > 0
-                      ? (cat.amount / activeMonthlySummary.totalExpenses) * 100
-                      : 0;
-                    const colors = ['bg-red-500', 'bg-orange-500', 'bg-yellow-500', 'bg-green-500', 'bg-blue-500'];
-                    return (
-                      <div key={cat.category}>
-                        <div className="mb-1 flex justify-between text-sm">
-                          <span className="text-gray-600">{cat.category}</span>
-                          <span className="font-medium text-gray-900">{formatCurrency(cat.amount)}</span>
-                        </div>
-                        <div className="h-2 overflow-hidden rounded-full bg-gray-100">
-                          <div
-                            className={`h-full ${colors[i]} rounded-full`}
-                            style={{ width: `${percentage}%` }}
-                          />
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-                <button
-                  onClick={() => setView('onboarding')}
-                  className="mt-6 w-full rounded-2xl bg-green-500 py-3 text-sm font-semibold text-white hover:bg-green-600 transition-colors"
-                >
-                  Start Premium Trial
-                </button>
-              </div>
-            </div>
-
-            {/* Social Proof */}
-            <div className="mt-20 text-center">
-              <p className="text-gray-500 mb-4">Trusted by small business owners</p>
-              <div className="flex justify-center gap-8 items-center flex-wrap">
-                <div className="text-center">
-                  <p className="text-3xl font-bold text-gray-900">2,000+</p>
-                  <p className="text-gray-500 text-sm">Active Users</p>
-                </div>
-                <div className="w-px h-12 bg-gray-200 hidden sm:block"></div>
-                <div className="text-center">
-                  <p className="text-3xl font-bold text-gray-900">GHS 2.5M+</p>
-                  <p className="text-gray-500 text-sm">Transactions Tracked</p>
-                </div>
-                <div className="w-px h-12 bg-gray-200 hidden sm:block"></div>
-                <div className="text-center">
-                  <p className="text-3xl font-bold text-gray-900">40%</p>
-                  <p className="text-gray-500 text-sm">Daily Response Rate</p>
-                </div>
-              </div>
-            </div>
-          </div>
-        </main>
-
-        {/* Footer */}
-        <footer className="border-t border-gray-200 py-8 px-4">
-          <div className="max-w-6xl mx-auto text-center text-gray-500 text-sm">
-            <p>{appCopyrightNotice}</p>
-          </div>
-        </footer>
-      </div>
-    );
+    return <LandingView setView={setView} heroSlide={heroSlide} setHeroSlide={setHeroSlide} appCopyrightNotice={appCopyrightNotice} />;
   }
 
   // Onboarding Flow
@@ -1507,11 +1399,10 @@ export default function App() {
         return;
       }
 
-      setIsSaving(true);
       setError(null);
 
       try {
-        const savedUser = await createUser({
+        const savedUser = await createUserMutation.mutateAsync({
           name: formData.name,
           phoneNumber: formData.phoneNumber,
           businessName: formData.businessName,
@@ -1535,8 +1426,6 @@ export default function App() {
         console.error(err);
         const message = err instanceof Error ? err.message : 'Failed to create your account. Please try again.';
         setError(message);
-      } finally {
-        setIsSaving(false);
       }
     };
 
@@ -1650,10 +1539,10 @@ export default function App() {
             )}
             <button
               onClick={finishOnboarding}
-              disabled={!formData[currentStep.field as keyof typeof formData] || isSaving}
+              disabled={!formData[currentStep.field as keyof typeof formData] || isOnboardingSubmitting}
               className="w-full py-4 bg-green-500 text-white rounded-2xl font-semibold text-lg hover:bg-green-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {isSaving ? 'Saving...' : onboardingStep === steps.length - 1 ? 'Start Free Trial' : 'Continue'}
+              {isOnboardingSubmitting ? 'Saving...' : onboardingStep === steps.length - 1 ? 'Start 1-Month Free Trial' : 'Continue'}
             </button>
           </div>
         </div>
@@ -1768,18 +1657,26 @@ export default function App() {
           </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
           <div className="bg-green-50 rounded-xl p-4">
             <p className="text-sm text-gray-500">Revenue</p>
             <p className="mt-2 text-2xl font-bold text-green-600">{formatCurrency(activeReportSummary.totalRevenue)}</p>
           </div>
-          <div className="bg-red-50 rounded-xl p-4">
-            <p className="text-sm text-gray-500">Expenses</p>
-            <p className="mt-2 text-2xl font-bold text-red-600">{formatCurrency(activeReportSummary.totalExpenses)}</p>
+          <div className="bg-amber-50 rounded-xl p-4">
+            <p className="text-sm text-gray-500">Direct Expenses</p>
+            <p className="mt-2 text-2xl font-bold text-amber-700">{formatCurrency(activeReportSummary.directExpenses)}</p>
           </div>
           <div className="bg-white rounded-xl p-4 border border-gray-100">
-            <p className="text-sm text-gray-500 mb-1">Profit</p>
-            <p className="text-2xl font-bold text-gray-900">{formatCurrency(activeReportSummary.profit)}</p>
+            <p className="text-sm text-gray-500 mb-1">Gross Profit</p>
+            <p className="text-2xl font-bold text-gray-900">{formatCurrency(activeReportSummary.grossProfit)}</p>
+          </div>
+          <div className="bg-red-50 rounded-xl p-4">
+            <p className="text-sm text-gray-500">Indirect Expenses</p>
+            <p className="mt-2 text-2xl font-bold text-red-600">{formatCurrency(activeReportSummary.indirectExpenses)}</p>
+          </div>
+          <div className="bg-white rounded-xl p-4 border border-gray-100">
+            <p className="text-sm text-gray-500 mb-1">Net Profit</p>
+            <p className="text-2xl font-bold text-gray-900">{formatCurrency(activeReportSummary.netProfit)}</p>
           </div>
           <div className="bg-white rounded-xl p-4 border border-gray-100">
             <p className="text-sm text-gray-500 mb-1">Transactions</p>
@@ -1807,6 +1704,12 @@ export default function App() {
               className="rounded-full bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-700"
             >
               Download PDF
+            </button>
+            <button
+              onClick={handleDownloadProfitLossCsv}
+              className="rounded-full border border-green-200 bg-green-50 px-4 py-2 text-sm font-semibold text-green-700 hover:bg-green-100"
+            >
+              Download CSV
             </button>
           </div>
         </div>
@@ -1836,10 +1739,10 @@ export default function App() {
           </div>
 
           <div className="border-t border-gray-200 px-4 py-4">
-            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Less: Business Expenses</p>
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Less: Direct Expenses</p>
             <div className="space-y-2">
-              {(expenseLines.length > 0 ? expenseLines : [{ label: 'No expenses recorded', amount: 0 }]).map((line) => (
-                <div key={`expense-${line.label}`} className="flex items-center justify-between text-sm">
+              {(directExpenseLines.length > 0 ? directExpenseLines : [{ label: 'No direct expenses recorded', amount: 0 }]).map((line) => (
+                <div key={`direct-expense-${line.label}`} className="flex items-center justify-between text-sm">
                   <span className="pl-4 text-gray-700">{line.label}</span>
                   <span className="font-semibold text-gray-900">{formatCurrency(line.amount)}</span>
                 </div>
@@ -1847,17 +1750,46 @@ export default function App() {
             </div>
             <div className="mt-3 border-t border-dashed border-gray-300 pt-3">
               <div className="flex items-center justify-between text-sm font-semibold text-gray-900">
-                <span>Total Expenses</span>
-                <span>{formatCurrency(activeReportSummary.totalExpenses)}</span>
+                <span>Total Direct Expenses</span>
+                <span>{formatCurrency(activeReportSummary.directExpenses)}</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="border-t border-gray-200 px-4 py-4">
+            <div className="flex items-center justify-between text-sm font-semibold text-gray-900">
+              <span>Gross Profit</span>
+              <span>{formatCurrency(activeReportSummary.grossProfit)}</span>
+            </div>
+          </div>
+
+          <div className="border-t border-gray-200 px-4 py-4">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Less: Indirect Business Expenses</p>
+            <div className="space-y-2">
+              {(indirectExpenseLines.length > 0 ? indirectExpenseLines : [{ label: 'No indirect expenses recorded', amount: 0 }]).map((line) => (
+                <div key={`indirect-expense-${line.label}`} className="flex items-center justify-between text-sm">
+                  <span className="pl-4 text-gray-700">{line.label}</span>
+                  <span className="font-semibold text-gray-900">{formatCurrency(line.amount)}</span>
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 border-t border-dashed border-gray-300 pt-3">
+              <div className="flex items-center justify-between text-sm font-semibold text-gray-900">
+                <span>Total Indirect Expenses</span>
+                <span>{formatCurrency(activeReportSummary.indirectExpenses)}</span>
               </div>
             </div>
           </div>
 
           <div className="border-t-2 border-gray-900 bg-gray-50 px-4 py-4">
+            <div className="mb-2 flex items-center justify-between text-sm font-semibold text-gray-900">
+              <span>Total Business Expenses</span>
+              <span>{formatCurrency(activeReportSummary.totalExpenses)}</span>
+            </div>
             <div className="flex items-center justify-between text-base font-bold">
               <span>Net Profit / (Loss)</span>
-              <span className={activeReportSummary.profit >= 0 ? 'text-green-700' : 'text-red-700'}>
-                {formatCurrency(activeReportSummary.profit)}
+              <span className={activeReportSummary.netProfit >= 0 ? 'text-green-700' : 'text-red-700'}>
+                {formatCurrency(activeReportSummary.netProfit)}
               </span>
             </div>
             <p className="mt-1 text-xs text-gray-500">
@@ -1870,6 +1802,72 @@ export default function App() {
             <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-700">
               {accountantReviewNote}
             </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-3xl shadow-lg shadow-gray-200 p-6">
+        <div className="mb-4 flex items-center justify-between">
+          <div>
+            <p className="text-sm text-gray-500">Cash movement only</p>
+            <h3 className="text-xl font-semibold text-gray-900">Cash Flow Snapshot</h3>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <span className="rounded-full bg-blue-100 px-3 py-1 text-xs font-semibold text-blue-700">
+              {reportPeriodLabel}
+            </span>
+            <button
+              onClick={handlePrintCashFlow}
+              className="rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+            >
+              Print / Save PDF
+            </button>
+            <button
+              onClick={handleDownloadCashFlow}
+              className="rounded-full bg-green-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-green-700"
+            >
+              Download PDF
+            </button>
+            <button
+              onClick={handleDownloadCashFlowCsv}
+              className="rounded-full border border-green-200 bg-green-50 px-3 py-1.5 text-xs font-semibold text-green-700 hover:bg-green-100"
+            >
+              Download CSV
+            </button>
+          </div>
+        </div>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between rounded-xl border border-gray-200 px-4 py-3 text-sm">
+            <span className="text-gray-600">Operating cash inflow</span>
+            <span className="font-semibold text-gray-900">{formatCurrency(activeReportSummary.cashFlow.operatingInflow)}</span>
+          </div>
+          <div className="flex items-center justify-between rounded-xl border border-gray-200 px-4 py-3 text-sm">
+            <span className="text-gray-600">Operating cash outflow</span>
+            <span className="font-semibold text-gray-900">{formatCurrency(activeReportSummary.cashFlow.operatingOutflow)}</span>
+          </div>
+          <div className="flex items-center justify-between rounded-xl border border-gray-200 px-4 py-3 text-sm">
+            <span className="text-gray-600">Financing cash inflow</span>
+            <span className="font-semibold text-gray-900">{formatCurrency(activeReportSummary.cashFlow.financingInflow)}</span>
+          </div>
+          <div className="flex items-center justify-between rounded-xl border border-gray-200 px-4 py-3 text-sm">
+            <span className="text-gray-600">Financing cash outflow</span>
+            <span className="font-semibold text-gray-900">{formatCurrency(activeReportSummary.cashFlow.financingOutflow)}</span>
+          </div>
+        </div>
+        <div className="mt-4 rounded-2xl border border-gray-900 bg-gray-50 px-4 py-4">
+          <div className="flex items-center justify-between text-sm font-semibold text-gray-900">
+            <span>Total cash inflow</span>
+            <span>{formatCurrency(activeReportSummary.cashFlow.totalCashInflow)}</span>
+          </div>
+          <div className="mt-1 flex items-center justify-between text-sm font-semibold text-gray-900">
+            <span>Total cash outflow</span>
+            <span>{formatCurrency(activeReportSummary.cashFlow.totalCashOutflow)}</span>
+          </div>
+          <div className="mt-3 flex items-center justify-between text-base font-bold">
+            <span>Net Cash Flow</span>
+            <span className={activeReportSummary.cashFlow.netCashFlow >= 0 ? 'text-green-700' : 'text-red-700'}>
+              {formatCurrency(activeReportSummary.cashFlow.netCashFlow)}
+            </span>
           </div>
         </div>
       </div>
@@ -1931,8 +1929,11 @@ export default function App() {
       </div>
 
       <div className="bg-white rounded-3xl shadow-lg shadow-gray-200 p-6">
-        <h3 className="font-semibold text-gray-900 mb-4">Profit & Loss chart</h3>
-        <SummaryChart weeklySummary={activeWeeklySummary} monthlySummary={activeReportSummary} monthLabel={reportPeriodLabel} />
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="font-semibold text-gray-900">Sales & Profit Trend</h3>
+          <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Line chart</span>
+        </div>
+        <SalesProfitTrendChart points={salesProfitTrendPoints} formatCurrency={formatCurrency} />
       </div>
 
       <div className="bg-white rounded-3xl shadow-lg shadow-gray-200 p-6">
@@ -2008,7 +2009,11 @@ export default function App() {
                       if (file && attachmentTransaction) {
                         const updated = { ...attachmentTransaction, attachmentName: file.name };
                         setAttachmentTransaction(updated);
-                        setTransactions((prev) => prev.map((tx) => tx.id === updated.id ? updated : tx));
+                        if (user?.id) {
+                          queryClient.setQueryData<Transaction[]>(['transactions', user.id], (previous = []) =>
+                            previous.map((tx) => (tx.id === updated.id ? updated : tx))
+                          );
+                        }
                       }
                     }}
                   />
@@ -2057,82 +2062,9 @@ export default function App() {
 
     const handleSend = async () => {
       if (!inputValue.trim()) return;
-      if (!user) {
-        setError('Please complete onboarding before sending messages.');
-        return;
-      }
-
       const message = inputValue.trim();
-      const userMessage: ChatMessage = {
-        id: Date.now().toString(),
-        type: 'user',
-        content: message,
-        timestamp: new Date()
-      };
-
-      setMessages((prev) => [...prev, userMessage]);
       setInputValue('');
-      setError(null);
-
-      try {
-        const result = await postChatEntry(user.id, message, 'web');
-
-        setFollowUpStep(null);
-
-        setTransactions((prev) => {
-          const merged = new Map(prev.map((tx) => [tx.id, tx]));
-          for (const tx of result.transactions) {
-            merged.set(tx.id, tx);
-          }
-          return Array.from(merged.values()).sort(
-            (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
-          );
-        });
-
-        setWeeklySummary(result.summary);
-        setMonthlySummary(result.monthlySummary);
-        const now = new Date();
-        const currentKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
-        setReportSummaryCache((prev) => ({ ...prev, [currentKey]: result.monthlySummary }));
-
-        try {
-          const latestInsights = await getCurrentInsights(user.id);
-          setCurrentInsights(latestInsights);
-          setReportInsightsCache((prev) => ({ ...prev, [currentKey]: latestInsights }));
-        } catch (insightError) {
-          console.error('Unable to refresh current insights after chat update', insightError);
-        }
-
-        let botText = result.botReply;
-        if (result.budgetStatuses.length > 0) {
-            const expenseBudget = result.budgetStatuses.find((status) => status.budget.targetType === 'expense');
-            if (expenseBudget) {
-              if (expenseBudget.status === 'overBudget') {
-              botText += `\n\nExpense alert: you are over budget by ${formatCurrency(Math.abs(expenseBudget.remaining))}.`;
-              } else if (expenseBudget.status === 'nearTarget') {
-                botText += `\n\nExpense watch: you have used ${Math.round(expenseBudget.percentUsed)}% of your budget.`;
-              }
-            }
-        }
-
-        const botResponse: ChatMessage = {
-          id: (Date.now() + 1).toString(),
-          type: 'bot',
-          content: botText,
-          timestamp: new Date()
-        };
-
-        setMessages((prev) => [...prev, botResponse]);
-      } catch (err) {
-        console.error(err);
-        const errorResponse: ChatMessage = {
-          id: (Date.now() + 1).toString(),
-          type: 'bot',
-          content: "I couldn't save that entry right now. Please try again in a moment.",
-          timestamp: new Date()
-        };
-        setMessages((prev) => [...prev, errorResponse]);
-      }
+      await submitChatMessage(message);
     };
 
     return (
@@ -2146,7 +2078,11 @@ export default function App() {
           </div>
           <div className="flex-1">
             <p className="text-white font-semibold">Akonta AI</p>
-            <p className="text-green-100 text-xs">Web chatbot active — WhatsApp integration also available.</p>
+            <p className="text-green-100 text-xs">
+              {pendingSyncCount > 0
+                ? `${pendingSyncCount} pending sync entr${pendingSyncCount === 1 ? 'y' : 'ies'}${isOutboxSyncing ? ' (syncing...)' : ''}`
+                : 'Web chatbot active — WhatsApp integration also available.'}
+            </p>
           </div>
           <button className="p-2">
             <BellIcon className="text-white" size={20} />
@@ -2179,6 +2115,8 @@ export default function App() {
                 </div>
                 <p className={`text-xs text-gray-400 mt-1 ${msg.type === 'user' ? 'text-right' : 'text-left'}`}>
                   {formatTime(msg.timestamp)}
+                  {msg.type === 'user' && msg.syncStatus === 'pending' ? ' • Pending sync' : ''}
+                  {msg.type === 'user' && msg.syncStatus === 'failed' ? ' • Sync failed' : ''}
                 </p>
               </div>
             </div>
@@ -2219,7 +2157,7 @@ export default function App() {
         <div className="bg-gradient-to-br from-green-500 to-green-600 px-4 pt-6 pb-20">
           <div className="flex items-center justify-between mb-6">
             <div>
-              <p className="text-green-100 text-sm">Good morning,</p>
+              <p className="text-green-100 text-sm">Good {dashboardDayPart},</p>
               <h1 className="text-white text-xl font-bold">{user?.name || 'Kofi'}</h1>
             </div>
             <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center">
@@ -2238,19 +2176,42 @@ export default function App() {
                 Overview
               </button>
               <button
-                onClick={() => setDashboardTab('reports')}
-                className={`rounded-2xl px-4 py-2 text-sm font-semibold ${dashboardTab === 'reports' ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-700'}`}
+                onClick={() => {
+                  if (!hasReportAccess) {
+                    setReportLockNotice('Reports are locked after your 1-month free access. Subscribe to unlock.');
+                    return;
+                  }
+                  setDashboardTab('reports');
+                }}
+                className={`rounded-2xl px-4 py-2 text-sm font-semibold ${
+                  hasReportAccess
+                    ? dashboardTab === 'reports'
+                      ? 'bg-green-600 text-white'
+                      : 'bg-gray-100 text-gray-700'
+                    : 'bg-gray-100 text-gray-400'
+                }`}
               >
                 Reports
               </button>
             </div>
           </div>
 
-          <div className="bg-gradient-to-r from-amber-500 to-orange-500 rounded-3xl shadow-lg shadow-orange-200 p-5 text-white">
+          {!hasReportAccess && (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              Reports are available only on active subscription.
+            </div>
+          )}
+          {reportLockNotice && (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              {reportLockNotice}
+            </div>
+          )}
+
+          <div className="bg-gradient-to-r from-amber-500 to-orange-500 rounded-2xl shadow-lg shadow-orange-200 p-4 text-white">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <p className="text-xs uppercase tracking-wide text-amber-100">Daily streak</p>
-                <p className="mt-2 text-3xl font-bold">
+                <p className="mt-1.5 text-2xl font-bold">
                   {dailyStreakCount} day{dailyStreakCount === 1 ? '' : 's'}
                 </p>
                 <p className="mt-2 text-sm text-amber-50">
@@ -2261,16 +2222,16 @@ export default function App() {
                       : 'Start your streak by logging today.'}
                 </p>
               </div>
-              <div className="rounded-2xl bg-white/20 p-3">
-                <CalendarIcon className="text-white" size={22} />
+              <div className="rounded-xl bg-white/20 p-2">
+                <CalendarIcon className="text-white" size={18} />
               </div>
             </div>
-            <div className="mt-4 border-t border-white/25 pt-3 text-xs text-amber-100">
+            <div className="mt-3 border-t border-white/25 pt-2.5 text-xs text-amber-100">
               Active days this month: {activeDaysThisMonth}
             </div>
           </div>
 
-          {dashboardTab === 'reports' ? (
+          {dashboardTab === 'reports' && hasReportAccess ? (
             <ReportWorkspace />
           ) : (
             <>
@@ -2415,21 +2376,25 @@ export default function App() {
             )}
           </div>
 
-          {user?.subscriptionStatus === 'trial' && (
+          {user?.subscriptionStatus === 'trial' && hasReportAccess && (
             <div className="bg-gradient-to-r from-amber-500 to-orange-500 rounded-2xl p-4">
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center">
                   <ClockIcon className="text-white" size={20} />
                 </div>
                 <div className="flex-1">
-                  <p className="text-white font-semibold">Free Trial Active</p>
-                  <p className="text-amber-100 text-sm">7 days remaining</p>
+                  <p className="text-white font-semibold">1-Month Free Access Active</p>
+                  <p className="text-amber-100 text-sm">
+                    {subscriptionDaysRemaining !== null
+                      ? `${subscriptionDaysRemaining} day${subscriptionDaysRemaining === 1 ? '' : 's'} left in your 1-month trial`
+                      : 'Active this month'}
+                  </p>
                 </div>
                 <button 
-                  onClick={() => setView('landing')}
+                  onClick={() => setView('settings')}
                   className="bg-white text-amber-600 px-4 py-2 rounded-full font-medium text-sm"
                 >
-                  View Plans
+                  Manage Plan
                 </button>
               </div>
             </div>
@@ -2659,38 +2624,52 @@ export default function App() {
 
   if (view === 'admin') {
     const refreshAdmin = async () => {
-      if (!user?.isSuperAdmin) return;
+      if (!isSuperAdmin) return;
       setAdminError(null);
-      try {
-        const [analytics, provider] = await Promise.all([
-          getAdminAnalytics(),
-          getAdminWhatsAppProvider()
-        ]);
-        setAdminAnalytics(analytics);
-        setAdminProviderInfo(provider);
-      } catch (error) {
-        console.error('Unable to refresh admin analytics', error);
+      const [analytics, provider, payment] = await Promise.all([
+        adminAnalyticsQuery.refetch(),
+        adminProviderQuery.refetch(),
+        adminPaymentSettingsQuery.refetch()
+      ]);
+      if (analytics.error || provider.error || payment.error) {
+        console.error('Unable to refresh admin analytics', analytics.error ?? provider.error ?? payment.error);
         setAdminError('Unable to refresh admin data.');
       }
     };
 
     const handleProviderUpdate = async (provider: WhatsAppProvider) => {
-      setIsAdminSaving(true);
       setAdminError(null);
       try {
-        const updated = await setAdminWhatsAppProvider(provider);
-        setAdminProviderInfo(updated);
-        const analytics = await getAdminAnalytics();
-        setAdminAnalytics(analytics);
+        await updateAdminProviderMutation.mutateAsync({ provider });
       } catch (error) {
         console.error('Unable to update provider setting', error);
         setAdminError('Unable to update WhatsApp provider.');
-      } finally {
-        setIsAdminSaving(false);
       }
     };
 
-    if (!user?.isSuperAdmin) {
+    const handleSaveWhatchimpSettings = async () => {
+      if (!adminWhatchimpDraft) return;
+      setAdminError(null);
+      try {
+        await updateAdminProviderMutation.mutateAsync({ whatchimp: adminWhatchimpDraft });
+      } catch (error) {
+        console.error('Unable to update Whatchimp settings', error);
+        setAdminError('Unable to update Whatchimp settings.');
+      }
+    };
+
+    const handleSavePaymentConfig = async () => {
+      if (!adminPaymentDraft) return;
+      setAdminError(null);
+      try {
+        await updateAdminPaymentMutation.mutateAsync(adminPaymentDraft);
+      } catch (error) {
+        console.error('Unable to update payment settings', error);
+        setAdminError('Unable to update Paystack settings.');
+      }
+    };
+
+    if (!isSuperAdmin) {
       return (
         <div className="min-h-screen bg-gray-50 pb-20">
           <div className="bg-white px-4 py-6 border-b border-gray-100">
@@ -2751,6 +2730,49 @@ export default function App() {
           </div>
 
           <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+            <h2 className="text-lg font-semibold text-gray-900">Daily subscriptions (last 14 days)</h2>
+            <p className="mt-1 text-sm text-gray-500">Successful paid subscriptions and estimated revenue per day.</p>
+            <div className="mt-4 grid grid-cols-2 gap-3">
+              <div className="rounded-2xl bg-gray-50 px-4 py-3">
+                <p className="text-xs uppercase tracking-wide text-gray-500">Total subscriptions</p>
+                <p className="mt-1 text-xl font-bold text-gray-900">
+                  {adminAnalytics?.subscriptions.daily.reduce((sum, day) => sum + day.count, 0) ?? 0}
+                </p>
+              </div>
+              <div className="rounded-2xl bg-gray-50 px-4 py-3">
+                <p className="text-xs uppercase tracking-wide text-gray-500">Revenue</p>
+                <p className="mt-1 text-xl font-bold text-gray-900">
+                  {formatCurrencyValue(
+                    adminAnalytics?.subscriptions.daily.reduce((sum, day) => sum + day.revenue, 0) ?? 0,
+                    adminPaymentDraft?.currencyCode ?? 'GHS'
+                  )}
+                </p>
+              </div>
+            </div>
+            {adminAnalytics?.subscriptions.daily.length ? (
+              <div className="mt-4 space-y-2">
+                {adminAnalytics.subscriptions.daily.map((day) => {
+                  const peak = Math.max(...adminAnalytics.subscriptions.daily.map((entry) => entry.count), 1);
+                  const width = day.count > 0 ? Math.max(8, (day.count / peak) * 100) : 0;
+                  return (
+                    <div key={day.date}>
+                      <div className="mb-1 flex items-center justify-between text-xs text-gray-600">
+                        <span>{new Date(`${day.date}T12:00:00Z`).toLocaleDateString('en-GH', { month: 'short', day: 'numeric' })}</span>
+                        <span>{day.count} subs • {formatCurrencyValue(day.revenue, adminPaymentDraft?.currencyCode ?? 'GHS')}</span>
+                      </div>
+                      <div className="h-2 overflow-hidden rounded-full bg-gray-100">
+                        <div className="h-full rounded-full bg-green-500" style={{ width: `${width}%` }} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="mt-3 text-sm text-gray-500">No subscription trend data yet.</p>
+            )}
+          </div>
+
+          <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
             <h2 className="text-lg font-semibold text-gray-900">WhatsApp provider</h2>
             <p className="mt-1 text-sm text-gray-500">Global provider used for outbound WhatsApp messages.</p>
             <div className="mt-4 grid gap-3 sm:grid-cols-2">
@@ -2769,6 +2791,212 @@ export default function App() {
                 </button>
               ))}
             </div>
+            <div className="mt-5 space-y-3 border-t border-gray-100 pt-4">
+              <h3 className="text-sm font-semibold text-gray-900">Whatchimp API details</h3>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="space-y-1">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Base URL</span>
+                  <input
+                    value={adminWhatchimpDraft?.baseUrl ?? ''}
+                    onChange={(event) =>
+                      setAdminWhatchimpDraft((prev) => ({
+                        baseUrl: event.target.value,
+                        apiKey: prev?.apiKey ?? '',
+                        senderId: prev?.senderId ?? '',
+                        sendPath: prev?.sendPath ?? '/api/messages/whatsapp',
+                        authScheme: prev?.authScheme ?? 'Bearer'
+                      }))
+                    }
+                    className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700"
+                    placeholder="https://api.whatchimp.com"
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">API key</span>
+                  <input
+                    value={adminWhatchimpDraft?.apiKey ?? ''}
+                    onChange={(event) =>
+                      setAdminWhatchimpDraft((prev) => ({
+                        baseUrl: prev?.baseUrl ?? '',
+                        apiKey: event.target.value,
+                        senderId: prev?.senderId ?? '',
+                        sendPath: prev?.sendPath ?? '/api/messages/whatsapp',
+                        authScheme: prev?.authScheme ?? 'Bearer'
+                      }))
+                    }
+                    className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700"
+                    placeholder="whatchimp_api_key"
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Sender ID</span>
+                  <input
+                    value={adminWhatchimpDraft?.senderId ?? ''}
+                    onChange={(event) =>
+                      setAdminWhatchimpDraft((prev) => ({
+                        baseUrl: prev?.baseUrl ?? '',
+                        apiKey: prev?.apiKey ?? '',
+                        senderId: event.target.value,
+                        sendPath: prev?.sendPath ?? '/api/messages/whatsapp',
+                        authScheme: prev?.authScheme ?? 'Bearer'
+                      }))
+                    }
+                    className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700"
+                    placeholder="AKONTA"
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Send path</span>
+                  <input
+                    value={adminWhatchimpDraft?.sendPath ?? ''}
+                    onChange={(event) =>
+                      setAdminWhatchimpDraft((prev) => ({
+                        baseUrl: prev?.baseUrl ?? '',
+                        apiKey: prev?.apiKey ?? '',
+                        senderId: prev?.senderId ?? '',
+                        sendPath: event.target.value,
+                        authScheme: prev?.authScheme ?? 'Bearer'
+                      }))
+                    }
+                    className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700"
+                    placeholder="/api/messages/whatsapp"
+                  />
+                </label>
+              </div>
+              <label className="space-y-1 block">
+                <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Auth scheme</span>
+                <select
+                  value={adminWhatchimpDraft?.authScheme ?? 'Bearer'}
+                  onChange={(event) =>
+                    setAdminWhatchimpDraft((prev) => ({
+                      baseUrl: prev?.baseUrl ?? '',
+                      apiKey: prev?.apiKey ?? '',
+                      senderId: prev?.senderId ?? '',
+                      sendPath: prev?.sendPath ?? '/api/messages/whatsapp',
+                      authScheme: event.target.value
+                    }))
+                  }
+                  className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700"
+                >
+                  <option value="Bearer">Bearer</option>
+                  <option value="App">App</option>
+                  <option value="Token">Token</option>
+                  <option value="none">none</option>
+                </select>
+              </label>
+              <button
+                onClick={handleSaveWhatchimpSettings}
+                disabled={isAdminSaving || !adminWhatchimpDraft}
+                className="rounded-full border border-gray-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+              >
+                Save Whatchimp Settings
+              </button>
+            </div>
+          </div>
+
+          <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+            <h2 className="text-lg font-semibold text-gray-900">Paystack subscription settings</h2>
+            <p className="mt-1 text-sm text-gray-500">Used for MoMo/card subscription checkout and webhook verification.</p>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <label className="space-y-1">
+                <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Public key</span>
+                <input
+                  value={adminPaymentDraft?.paystackPublicKey ?? ''}
+                  onChange={(event) =>
+                    setAdminPaymentDraft((prev) => ({
+                      paystackPublicKey: event.target.value,
+                      paystackSecretKey: prev?.paystackSecretKey ?? '',
+                      paystackWebhookSecret: prev?.paystackWebhookSecret ?? '',
+                      premiumAmount: prev?.premiumAmount ?? 50,
+                      currencyCode: prev?.currencyCode ?? 'GHS'
+                    }))
+                  }
+                  className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700"
+                  placeholder="pk_live_..."
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Secret key</span>
+                <input
+                  value={adminPaymentDraft?.paystackSecretKey ?? ''}
+                  onChange={(event) =>
+                    setAdminPaymentDraft((prev) => ({
+                      paystackPublicKey: prev?.paystackPublicKey ?? '',
+                      paystackSecretKey: event.target.value,
+                      paystackWebhookSecret: prev?.paystackWebhookSecret ?? '',
+                      premiumAmount: prev?.premiumAmount ?? 50,
+                      currencyCode: prev?.currencyCode ?? 'GHS'
+                    }))
+                  }
+                  className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700"
+                  placeholder="sk_live_..."
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Webhook secret</span>
+                <input
+                  value={adminPaymentDraft?.paystackWebhookSecret ?? ''}
+                  onChange={(event) =>
+                    setAdminPaymentDraft((prev) => ({
+                      paystackPublicKey: prev?.paystackPublicKey ?? '',
+                      paystackSecretKey: prev?.paystackSecretKey ?? '',
+                      paystackWebhookSecret: event.target.value,
+                      premiumAmount: prev?.premiumAmount ?? 50,
+                      currencyCode: prev?.currencyCode ?? 'GHS'
+                    }))
+                  }
+                  className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700"
+                  placeholder="paystack_webhook_secret"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Currency code</span>
+                <input
+                  value={adminPaymentDraft?.currencyCode ?? 'GHS'}
+                  onChange={(event) =>
+                    setAdminPaymentDraft((prev) => ({
+                      paystackPublicKey: prev?.paystackPublicKey ?? '',
+                      paystackSecretKey: prev?.paystackSecretKey ?? '',
+                      paystackWebhookSecret: prev?.paystackWebhookSecret ?? '',
+                      premiumAmount: prev?.premiumAmount ?? 50,
+                      currencyCode: event.target.value.toUpperCase()
+                    }))
+                  }
+                  className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700"
+                  placeholder="GHS"
+                />
+              </label>
+            </div>
+            <label className="mt-3 block space-y-1">
+              <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Premium amount (major unit)</span>
+              <input
+                type="number"
+                min="1"
+                value={adminPaymentDraft?.premiumAmount ?? 50}
+                onChange={(event) =>
+                  setAdminPaymentDraft((prev) => ({
+                    paystackPublicKey: prev?.paystackPublicKey ?? '',
+                    paystackSecretKey: prev?.paystackSecretKey ?? '',
+                    paystackWebhookSecret: prev?.paystackWebhookSecret ?? '',
+                    premiumAmount: Number(event.target.value || 50),
+                    currencyCode: prev?.currencyCode ?? 'GHS'
+                  }))
+                }
+                className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700"
+              />
+            </label>
+            {adminPaymentSettings && (
+              <p className="mt-3 text-xs text-gray-500">
+                Current live price: {formatCurrencyValue(adminPaymentSettings.premiumAmount, adminPaymentSettings.currencyCode)} / month
+              </p>
+            )}
+            <button
+              onClick={handleSavePaymentConfig}
+              disabled={isAdminSaving || !adminPaymentDraft}
+              className="mt-4 rounded-full border border-gray-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+            >
+              Save Paystack Settings
+            </button>
           </div>
 
           <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
@@ -2828,74 +3056,88 @@ export default function App() {
 
     const handleSaveBudget = async () => {
       if (!user || !budgetAmount) return;
-      setIsSaving(true);
       setError(null);
 
       try {
-        const saved = await postBudget({
+        const saved = await saveBudgetMutation.mutateAsync({
           userId: user.id,
           year: currentYear,
           month: currentMonth,
           targetType: budgetTargetType,
           amount: Number(budgetAmount)
         });
-
-        setBudgets((prev) => {
-          const existingIndex = prev.findIndex((budget) => budget.targetType === saved.targetType && budget.periodStart === saved.periodStart);
+        queryClient.setQueryData<Budget[]>(['budgets', user.id], (previous = []) => {
+          const existingIndex = previous.findIndex((budget) => (
+            budget.targetType === saved.targetType && budget.periodStart === saved.periodStart
+          ));
           if (existingIndex >= 0) {
-            const next = [...prev];
+            const next = [...previous];
             next[existingIndex] = saved;
             return next;
           }
-          return [...prev, saved];
+          return [...previous, saved];
         });
-
-        const latestInsights = await getCurrentInsights(user.id);
-        setCurrentInsights(latestInsights);
-        const now = new Date();
-        const currentKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
-        setReportInsightsCache((prev) => ({ ...prev, [currentKey]: latestInsights }));
       } catch (budgetSaveError) {
         console.error('Unable to save budget', budgetSaveError);
         setError('Unable to save budget. Please try again.');
-      } finally {
-        setIsSaving(false);
       }
     };
 
     const handleSaveCurrency = async () => {
       if (!user) return;
-      setIsSaving(true);
       setError(null);
+      setSettingsNotice(null);
       try {
-        const updated = await updateUser(user.id, { currencyCode: settingsCurrencyCode });
+        const updated = await updateUserMutation.mutateAsync({
+          id: user.id,
+          updates: { currencyCode: settingsCurrencyCode }
+        });
         setUser(updated);
+        setSettingsNotice('Currency preference saved.');
       } catch (currencyError) {
         console.error('Unable to update currency', currencyError);
         setError('Unable to save currency preference right now.');
-      } finally {
-        setIsSaving(false);
       }
     };
 
-    const handleDemoPremiumActivation = async () => {
+    const handleStartPremiumCheckout = async () => {
       if (!user) return;
-      setIsSaving(true);
       setError(null);
+      setSettingsNotice(null);
       try {
-        const updated = await activateUserSubscription(user.id, {
-          status: 'premium',
-          source: 'paid',
+        const callbackUrl = `${window.location.origin}${window.location.pathname}`;
+        const initialized = await initializeSubscriptionMutation.mutateAsync({
+          userId: user.id,
           months: 1,
-          note: 'Demo premium activation'
+          callbackUrl
+        });
+        window.location.assign(initialized.authorizationUrl);
+      } catch (subscriptionError) {
+        console.error('Unable to initialize subscription checkout', subscriptionError);
+        setError('Unable to start payment checkout right now.');
+      }
+    };
+
+    const handleManualPremiumActivation = async () => {
+      if (!user) return;
+      setError(null);
+      setSettingsNotice(null);
+      try {
+        const updated = await activateSubscriptionMutation.mutateAsync({
+          userId: user.id,
+          request: {
+            status: 'premium',
+            source: 'paid',
+            months: 1,
+            note: 'Manual premium activation'
+          }
         });
         setUser(updated);
-        await refreshReferralData();
+        await referralProgressQuery.refetch();
+        setSettingsNotice('Premium manually activated for this account.');
       } catch (subscriptionError) {
         console.error('Unable to activate subscription', subscriptionError);
         setError('Unable to activate subscription.');
-      } finally {
-        setIsSaving(false);
       }
     };
 
@@ -2911,6 +3153,12 @@ export default function App() {
         </div>
 
         <div className="px-4 py-6 space-y-4">
+          {settingsNotice && (
+            <div className="rounded-2xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">
+              {settingsNotice}
+            </div>
+          )}
+
           <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Currency preference</h2>
             <div className="grid gap-3 sm:grid-cols-2">
@@ -2933,10 +3181,10 @@ export default function App() {
             </div>
             <button
               onClick={handleSaveCurrency}
-              disabled={isSaving}
+              disabled={isAnySettingsActionPending}
               className="mt-4 inline-flex items-center justify-center rounded-2xl bg-green-500 px-5 py-3 text-sm font-semibold text-white hover:bg-green-600 disabled:opacity-50"
             >
-              {isSaving ? 'Saving...' : 'Save Currency'}
+              {isSavingCurrency ? 'Saving...' : 'Save Currency'}
             </button>
           </div>
 
@@ -2944,7 +3192,7 @@ export default function App() {
             <div className="mb-4 flex items-start justify-between gap-4">
               <div>
                 <h2 className="text-lg font-semibold text-gray-900">Referral rewards</h2>
-                <p className="text-sm text-gray-500">Invite 5 paid users and unlock 3 free premium months.</p>
+                <p className="text-sm text-gray-500">Every 3 referral signups unlocks 1 extra month of premium access.</p>
               </div>
               <button
                 onClick={refreshReferralData}
@@ -2971,22 +3219,31 @@ export default function App() {
 
             <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3">
               <p className="text-xs uppercase tracking-wide text-gray-500">Your referral link</p>
-              <p className="mt-2 break-all text-sm text-gray-800">{referralProgress?.referralLink ?? (isReferralLoading ? 'Loading...' : 'Unavailable')}</p>
+              <p className="mt-2 break-all text-sm text-gray-800">{effectiveReferralLink ?? (isReferralLoading ? 'Loading...' : 'Unavailable')}</p>
               <div className="mt-3 flex flex-wrap gap-2">
                 <button
                   onClick={copyReferralLink}
-                  disabled={!referralProgress?.referralLink}
+                  disabled={!effectiveReferralLink}
                   className="rounded-full bg-green-600 px-4 py-2 text-xs font-semibold text-white hover:bg-green-700 disabled:opacity-50"
                 >
                   Copy Link
                 </button>
                 <button
-                  onClick={handleDemoPremiumActivation}
-                  disabled={isSaving}
-                  className="rounded-full border border-gray-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                  onClick={handleStartPremiumCheckout}
+                  disabled={isAnySettingsActionPending}
+                  className="rounded-full bg-amber-500 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-600 disabled:opacity-50"
                 >
-                  Mark This Account Paid (Demo)
+                  {isStartingCheckout ? 'Redirecting...' : 'Subscribe Now (MoMo/Card)'}
                 </button>
+                {user?.isSuperAdmin && (
+                  <button
+                    onClick={handleManualPremiumActivation}
+                    disabled={isAnySettingsActionPending}
+                    className="rounded-full border border-gray-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    {isActivatingPremium ? 'Saving...' : 'Manual Premium (Admin)'}
+                  </button>
+                )}
               </div>
               {referralCopyMessage && <p className="mt-2 text-xs text-green-700">{referralCopyMessage}</p>}
             </div>
@@ -3020,10 +3277,10 @@ export default function App() {
             {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
             <button
               onClick={handleSaveBudget}
-              disabled={isSaving || !budgetAmount}
+              disabled={isAnySettingsActionPending || !budgetAmount}
               className="mt-4 inline-flex items-center justify-center rounded-2xl bg-green-500 px-5 py-3 text-sm font-semibold text-white hover:bg-green-600 disabled:opacity-50"
             >
-              {isSaving ? 'Saving...' : 'Save Budget'}
+              {isSavingBudget ? 'Saving...' : 'Save Budget'}
             </button>
           </div>
 
@@ -3052,18 +3309,6 @@ export default function App() {
             </div>
           </div>
 
-          {user?.isSuperAdmin && (
-            <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
-              <h2 className="text-lg font-semibold text-gray-900 mb-2">Super admin tools</h2>
-              <p className="text-sm text-gray-600">Manage global analytics and WhatsApp provider selection from the admin panel.</p>
-              <button
-                onClick={() => setView('admin')}
-                className="mt-4 rounded-2xl bg-gray-900 px-4 py-2 text-sm font-semibold text-white hover:bg-black"
-              >
-                Open Super Admin Panel
-              </button>
-            </div>
-          )}
         </div>
 
         <BottomNav />

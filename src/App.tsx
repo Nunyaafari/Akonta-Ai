@@ -56,7 +56,7 @@ import {
   removePendingChatMessage
 } from './lib/offlineQueue';
 
-const brandMarkSrc = '/brand/fav.svg';
+const brandMarkSrc = '/brand/akonta.svg';
 const appCopyrightNotice = `© ${new Date().getFullYear()} All rights reserved. Amagold Technologies Ltd.`;
 const supportedCurrencies = ['GHS', 'USD', 'NGN', 'KES', 'EUR', 'GBP'] as const;
 

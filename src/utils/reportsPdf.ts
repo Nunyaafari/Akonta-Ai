@@ -1,0 +1,345 @@
+import { formatStatementAmount } from './formatters';
+import { resolveBusinessName, resolveOwnerName, resolvePreparedOn } from './reportCommon';
+import type { CashFlowPdfParams, ProfitLossPdfParams, StatementLine } from './reportTypes';
+
+type PdfMetadataEntry = [label: string, value: string];
+
+interface PdfStatementContext {
+  doc: import('jspdf').jsPDF;
+  margin: number;
+  rightEdge: number;
+  pageHeight: number;
+  cursorY: number;
+  statementAmount: (value: number) => string;
+}
+
+interface PdfSectionOptions {
+  title: string;
+  rows: StatementLine[];
+  emptyLabel: string;
+  totalLabel: string;
+  totalAmount: number;
+  rowIndent?: number;
+  sectionTopSpace?: number;
+  sectionAfterRowsSpace?: number;
+  sectionAfterTotalSpace?: number;
+}
+
+const createPdfStatementContext = async (activeCurrencyCode: string): Promise<PdfStatementContext> => {
+  const { jsPDF } = await import('jspdf');
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' });
+  const margin = 48;
+  const pageWidth = doc.internal.pageSize.getWidth();
+  return {
+    doc,
+    margin,
+    rightEdge: pageWidth - margin,
+    pageHeight: doc.internal.pageSize.getHeight(),
+    cursorY: margin,
+    statementAmount: (value: number) => formatStatementAmount(value, activeCurrencyCode)
+  };
+};
+
+const ensurePdfSpace = (ctx: PdfStatementContext, heightNeeded: number) => {
+  if (ctx.cursorY + heightNeeded <= ctx.pageHeight - ctx.margin) return;
+  ctx.doc.addPage();
+  ctx.cursorY = ctx.margin;
+};
+
+const drawPdfRows = (
+  ctx: PdfStatementContext,
+  rows: StatementLine[],
+  options?: { rowIndent?: number; emptyLabel?: string }
+) => {
+  const rowIndent = options?.rowIndent ?? 0;
+  const renderRows = rows.length > 0
+    ? rows
+    : [{ label: options?.emptyLabel ?? 'No data recorded', amount: 0 }];
+
+  renderRows.forEach((row) => {
+    const wrappedLabel = ctx.doc.splitTextToSize(row.label, ctx.rightEdge - (ctx.margin + rowIndent) - 130);
+    const rowHeight = Math.max(14, wrappedLabel.length * 12);
+    ensurePdfSpace(ctx, rowHeight + 4);
+    ctx.doc.setFont('times', 'normal');
+    ctx.doc.setFontSize(10);
+    ctx.doc.text(wrappedLabel, ctx.margin + rowIndent, ctx.cursorY);
+    ctx.doc.text(ctx.statementAmount(row.amount), ctx.rightEdge, ctx.cursorY, { align: 'right' });
+    ctx.cursorY += rowHeight;
+  });
+};
+
+const renderPdfSection = (ctx: PdfStatementContext, options: PdfSectionOptions) => {
+  ensurePdfSpace(ctx, options.sectionTopSpace ?? 54);
+  ctx.doc.setFont('times', 'bold');
+  ctx.doc.setFontSize(11);
+  ctx.doc.text(options.title.toUpperCase(), ctx.margin, ctx.cursorY);
+  ctx.cursorY += 10;
+  ctx.doc.line(ctx.margin, ctx.cursorY, ctx.rightEdge, ctx.cursorY);
+  ctx.cursorY += 16;
+  drawPdfRows(ctx, options.rows, { rowIndent: options.rowIndent, emptyLabel: options.emptyLabel });
+  ensurePdfSpace(ctx, options.sectionAfterRowsSpace ?? 22);
+  ctx.doc.line(ctx.margin, ctx.cursorY, ctx.rightEdge, ctx.cursorY);
+  ctx.cursorY += 14;
+  ctx.doc.setFont('times', 'bold');
+  ctx.doc.text(options.totalLabel, ctx.margin, ctx.cursorY);
+  ctx.doc.text(ctx.statementAmount(options.totalAmount), ctx.rightEdge, ctx.cursorY, { align: 'right' });
+  ctx.cursorY += options.sectionAfterTotalSpace ?? 24;
+};
+
+const renderPdfTitleAndSubtitle = (ctx: PdfStatementContext, title: string, subtitle: string) => {
+  ctx.doc.setFont('times', 'bold');
+  ctx.doc.setFontSize(24);
+  ctx.doc.text(title, ctx.margin, ctx.cursorY);
+  ctx.cursorY += 26;
+
+  ctx.doc.setFont('times', 'normal');
+  ctx.doc.setFontSize(12);
+  ctx.doc.text(subtitle, ctx.margin, ctx.cursorY);
+  ctx.cursorY += 24;
+};
+
+const renderPdfMetadata = (ctx: PdfStatementContext, left: PdfMetadataEntry[], right: PdfMetadataEntry[]) => {
+  const metadataTop = ctx.cursorY;
+  const columnGap = 28;
+  const columnWidth = (ctx.rightEdge - ctx.margin - columnGap) / 2;
+  const labelWidth = 92;
+  const renderMetadataColumn = (entries: PdfMetadataEntry[], x: number, startY: number) => {
+    let y = startY;
+    entries.forEach(([label, value]) => {
+      ensurePdfSpace(ctx, 20);
+      ctx.doc.setFont('times', 'bold');
+      ctx.doc.setFontSize(10);
+      ctx.doc.text(`${label}:`, x, y);
+      ctx.doc.setFont('times', 'normal');
+      const wrapped = ctx.doc.splitTextToSize(value, columnWidth - labelWidth);
+      ctx.doc.text(wrapped, x + labelWidth, y);
+      y += Math.max(16, wrapped.length * 12);
+    });
+    return y;
+  };
+
+  const leftColumnY = renderMetadataColumn(left, ctx.margin, metadataTop);
+  const rightColumnY = renderMetadataColumn(right, ctx.margin + columnWidth + columnGap, metadataTop);
+  ctx.cursorY = Math.max(leftColumnY, rightColumnY) + 8;
+};
+
+const renderPdfFooter = (ctx: PdfStatementContext, reportPeriodLabel: string, appCopyrightNotice: string) => {
+  ensurePdfSpace(ctx, 22);
+  ctx.doc.setFontSize(9);
+  ctx.doc.setTextColor(107, 114, 128);
+  const footerText = `Generated by Akonta AI accounting workflow engine for ${reportPeriodLabel}. ${appCopyrightNotice}`;
+  const footerLines = ctx.doc.splitTextToSize(footerText, ctx.rightEdge - ctx.margin);
+  ctx.doc.text(footerLines, ctx.margin, ctx.cursorY);
+  ctx.doc.setTextColor(17, 24, 39);
+};
+
+export const generateProfitLossPdf = async (params: ProfitLossPdfParams): Promise<void> => {
+  const {
+    user,
+    reportPeriodLabel,
+    reportStatementSubtitle,
+    activeCurrencyCode,
+    reportMode,
+    statementPreparedBy,
+    appCopyrightNotice,
+    incomeLines,
+    directExpenseLines,
+    indirectExpenseLines,
+    activeReportSummary,
+    netMargin,
+    accountantReviewNote,
+    statementBusinessKey,
+    statementPeriodKey
+  } = params;
+
+  const ctx = await createPdfStatementContext(activeCurrencyCode);
+  renderPdfTitleAndSubtitle(ctx, 'Profit and Loss Statement', reportStatementSubtitle);
+
+  const metadataLeft: Array<[string, string]> = [
+    ['Business', resolveBusinessName(user)],
+    ['Prepared For', resolveOwnerName(user)],
+    ['Prepared By', statementPreparedBy]
+  ];
+  const metadataRight: Array<[string, string]> = [
+    ['Reporting Period', reportPeriodLabel],
+    ['Prepared On', resolvePreparedOn()],
+    ['Statement Basis', reportMode === 'yearly' ? 'Annual Management Statement' : 'Monthly Management Statement']
+  ];
+  renderPdfMetadata(ctx, metadataLeft, metadataRight);
+
+  renderPdfSection(ctx, {
+    title: 'Income',
+    rows: incomeLines,
+    emptyLabel: 'No income recorded',
+    totalLabel: 'Total Income',
+    totalAmount: activeReportSummary.totalRevenue
+  });
+  renderPdfSection(ctx, {
+    title: 'Less: Direct Expenses',
+    rows: directExpenseLines,
+    emptyLabel: 'No direct expenses recorded',
+    totalLabel: 'Total Direct Expenses',
+    totalAmount: activeReportSummary.directExpenses,
+    rowIndent: 16
+  });
+
+  ensurePdfSpace(ctx, 24);
+  ctx.doc.setFont('times', 'bold');
+  ctx.doc.setFontSize(11);
+  ctx.doc.text('Gross Profit', ctx.margin, ctx.cursorY);
+  ctx.doc.text(ctx.statementAmount(activeReportSummary.grossProfit), ctx.rightEdge, ctx.cursorY, { align: 'right' });
+  ctx.cursorY += 20;
+
+  renderPdfSection(ctx, {
+    title: 'Less: Indirect Business Expenses',
+    rows: indirectExpenseLines,
+    emptyLabel: 'No indirect expenses recorded',
+    totalLabel: 'Total Indirect Expenses',
+    totalAmount: activeReportSummary.indirectExpenses,
+    rowIndent: 16
+  });
+
+  ensurePdfSpace(ctx, 30);
+  ctx.doc.line(ctx.margin, ctx.cursorY, ctx.rightEdge, ctx.cursorY);
+  ctx.cursorY += 14;
+  ctx.doc.setFont('times', 'bold');
+  ctx.doc.setFontSize(11);
+  ctx.doc.text('Total Business Expenses', ctx.margin, ctx.cursorY);
+  ctx.doc.text(ctx.statementAmount(activeReportSummary.totalExpenses), ctx.rightEdge, ctx.cursorY, { align: 'right' });
+  ctx.cursorY += 18;
+  ctx.doc.text('Net Profit / (Loss)', ctx.margin, ctx.cursorY);
+  ctx.doc.text(ctx.statementAmount(activeReportSummary.netProfit), ctx.rightEdge, ctx.cursorY, { align: 'right' });
+  ctx.cursorY += 16;
+  ctx.doc.setFont('times', 'normal');
+  ctx.doc.setFontSize(10);
+  ctx.doc.text(`Net Margin: ${activeReportSummary.totalRevenue > 0 ? `${netMargin.toFixed(1)}%` : 'N/A'}`, ctx.margin, ctx.cursorY);
+  ctx.cursorY += 24;
+
+  ensurePdfSpace(ctx, 58);
+  ctx.doc.setFont('times', 'bold');
+  ctx.doc.setFontSize(10);
+  ctx.doc.text('Accountant Review Note', ctx.margin, ctx.cursorY);
+  ctx.cursorY += 14;
+  ctx.doc.setFont('times', 'normal');
+  const reviewLines = ctx.doc.splitTextToSize(accountantReviewNote, ctx.rightEdge - ctx.margin);
+  ctx.doc.text(reviewLines, ctx.margin, ctx.cursorY);
+  ctx.cursorY += Math.max(20, reviewLines.length * 12 + 10);
+
+  renderPdfFooter(ctx, reportPeriodLabel, appCopyrightNotice);
+  ctx.doc.save(`${statementBusinessKey}-profit-loss-${statementPeriodKey}.pdf`);
+};
+
+export const generateCashFlowPdf = async (params: CashFlowPdfParams): Promise<void> => {
+  const {
+    user,
+    reportPeriodLabel,
+    reportStatementSubtitle,
+    activeCurrencyCode,
+    statementPreparedBy,
+    appCopyrightNotice,
+    cashFlowLineItems,
+    activeReportSummary,
+    statementBusinessKey,
+    statementPeriodKey
+  } = params;
+
+  const ctx = await createPdfStatementContext(activeCurrencyCode);
+  renderPdfTitleAndSubtitle(ctx, 'Cash Flow Statement', reportStatementSubtitle);
+
+  const metadataLeft: Array<[string, string]> = [
+    ['Business', resolveBusinessName(user)],
+    ['Prepared For', resolveOwnerName(user)],
+    ['Prepared By', statementPreparedBy]
+  ];
+  const metadataRight: Array<[string, string]> = [
+    ['Reporting Period', reportPeriodLabel],
+    ['Prepared On', resolvePreparedOn()],
+    ['Statement Basis', 'Cash Basis Management Statement']
+  ];
+  renderPdfMetadata(ctx, metadataLeft, metadataRight);
+
+  renderPdfSection(ctx, {
+    title: 'Operating Activities - Cash Inflows',
+    rows: cashFlowLineItems.operatingInflowLines,
+    emptyLabel: 'No operating cash inflows recorded',
+    totalLabel: 'Total Operating Inflow',
+    totalAmount: activeReportSummary.cashFlow.operatingInflow,
+    sectionTopSpace: 56,
+    sectionAfterRowsSpace: 20,
+    sectionAfterTotalSpace: 22
+  });
+  renderPdfSection(ctx, {
+    title: 'Operating Activities - Cash Outflows',
+    rows: cashFlowLineItems.operatingOutflowLines,
+    emptyLabel: 'No operating cash outflows recorded',
+    totalLabel: 'Total Operating Outflow',
+    totalAmount: activeReportSummary.cashFlow.operatingOutflow,
+    sectionTopSpace: 56,
+    sectionAfterRowsSpace: 20,
+    sectionAfterTotalSpace: 22
+  });
+  ensurePdfSpace(ctx, 20);
+  ctx.doc.setFont('times', 'bold');
+  ctx.doc.text('Net Cash from Operating Activities', ctx.margin, ctx.cursorY);
+  ctx.doc.text(
+    ctx.statementAmount(activeReportSummary.cashFlow.operatingInflow - activeReportSummary.cashFlow.operatingOutflow),
+    ctx.rightEdge,
+    ctx.cursorY,
+    { align: 'right' }
+  );
+  ctx.cursorY += 24;
+
+  renderPdfSection(ctx, {
+    title: 'Financing Activities - Cash Inflows',
+    rows: cashFlowLineItems.financingInflowLines,
+    emptyLabel: 'No financing inflows recorded',
+    totalLabel: 'Total Financing Inflow',
+    totalAmount: activeReportSummary.cashFlow.financingInflow,
+    sectionTopSpace: 56,
+    sectionAfterRowsSpace: 20,
+    sectionAfterTotalSpace: 22
+  });
+  renderPdfSection(ctx, {
+    title: 'Financing Activities - Cash Outflows',
+    rows: cashFlowLineItems.financingOutflowLines,
+    emptyLabel: 'No financing outflows recorded',
+    totalLabel: 'Total Financing Outflow',
+    totalAmount: activeReportSummary.cashFlow.financingOutflow,
+    sectionTopSpace: 56,
+    sectionAfterRowsSpace: 20,
+    sectionAfterTotalSpace: 22
+  });
+  ensurePdfSpace(ctx, 20);
+  ctx.doc.setFont('times', 'bold');
+  ctx.doc.text('Net Cash from Financing Activities', ctx.margin, ctx.cursorY);
+  ctx.doc.text(
+    ctx.statementAmount(activeReportSummary.cashFlow.financingInflow - activeReportSummary.cashFlow.financingOutflow),
+    ctx.rightEdge,
+    ctx.cursorY,
+    { align: 'right' }
+  );
+  ctx.cursorY += 24;
+
+  ensurePdfSpace(ctx, 40);
+  ctx.doc.line(ctx.margin, ctx.cursorY, ctx.rightEdge, ctx.cursorY);
+  ctx.cursorY += 14;
+  ctx.doc.setFont('times', 'bold');
+  ctx.doc.text('Total Cash Inflow', ctx.margin, ctx.cursorY);
+  ctx.doc.text(ctx.statementAmount(activeReportSummary.cashFlow.totalCashInflow), ctx.rightEdge, ctx.cursorY, { align: 'right' });
+  ctx.cursorY += 16;
+  ctx.doc.text('Total Cash Outflow', ctx.margin, ctx.cursorY);
+  ctx.doc.text(ctx.statementAmount(activeReportSummary.cashFlow.totalCashOutflow), ctx.rightEdge, ctx.cursorY, { align: 'right' });
+  ctx.cursorY += 18;
+  ctx.doc.setTextColor(
+    activeReportSummary.cashFlow.netCashFlow >= 0 ? 4 : 185,
+    activeReportSummary.cashFlow.netCashFlow >= 0 ? 120 : 28,
+    activeReportSummary.cashFlow.netCashFlow >= 0 ? 87 : 28
+  );
+  ctx.doc.text('Net Cash Flow', ctx.margin, ctx.cursorY);
+  ctx.doc.text(ctx.statementAmount(activeReportSummary.cashFlow.netCashFlow), ctx.rightEdge, ctx.cursorY, { align: 'right' });
+  ctx.doc.setTextColor(17, 24, 39);
+  ctx.cursorY += 24;
+
+  renderPdfFooter(ctx, reportPeriodLabel, appCopyrightNotice);
+  ctx.doc.save(`${statementBusinessKey}-cash-flow-${statementPeriodKey}.pdf`);
+};

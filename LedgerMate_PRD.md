@@ -173,5 +173,34 @@ Week 4: Launch
 
 ---
 
+## 🚀 13. Next Phase Plan (May–July 2026)
+
+### Phase 1: Reporting Hardening (2 weeks)
+- Finalize modular report architecture (`HTML`, `PDF`, `CSV`, shared types/utilities).
+- Add regression tests for statement builders and export generators.
+- Ensure branding consistency (new logo + favicon across app shell, landing, manifest, service worker).
+
+### Phase 2: Reliability + Observability (2 weeks)
+- Add structured error logging for report generation, sync, and payment flows.
+- Add retry-safe handling for offline queue and background sync failures.
+- Introduce release health metrics (PDF success rate, sync failure rate, daily active usage).
+
+### Phase 3: Product Expansion (3 weeks)
+- Improve insights quality: better categorization and clearer action recommendations.
+- Enhance premium value: stronger cash-flow alerts and period-over-period comparisons.
+- Add admin-facing diagnostics for onboarding, subscription, and message delivery issues.
+
+### Phase 4: Launch Readiness (1 week)
+- Execute full QA checklist on dashboard, reports, chat classification, and settings.
+- Run performance and bundle-size review before release.
+- Publish release notes and rollback plan.
+
+### Success Criteria
+- Report generation errors below 1%.
+- No P1 regressions in dashboard/report workflows during release window.
+- Weekly retention and premium conversion exceed current baseline.
+
+---
+
 ## 🔥 Final Insight
 This is a behavioral system, not accounting software.

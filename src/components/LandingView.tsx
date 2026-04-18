@@ -20,7 +20,7 @@ export const LandingView: React.FC<LandingViewProps> = ({ setView, heroSlide, se
       <header className="px-4 py-6">
         <div className="max-w-6xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <img src="/brand/fav.svg" alt="Akonta AI logo" className="h-10 w-auto object-contain" />
+            <img src="/brand/akonta.svg" alt="Akonta AI logo" className="h-10 w-auto object-contain" />
             <span className="text-xl font-bold text-gray-900">Akonta AI</span>
           </div>
           <button onClick={() => setView('onboarding')} className="px-4 py-2 bg-green-500 text-white rounded-full font-medium hover:bg-green-600 transition-colors">
@@ -66,7 +66,7 @@ export const LandingView: React.FC<LandingViewProps> = ({ setView, heroSlide, se
             <div className="bg-white rounded-3xl shadow-2xl shadow-gray-200 overflow-hidden border border-gray-100">
               <div className="bg-green-600 px-4 py-3 flex items-center gap-3">
                 <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center p-1.5">
-                  <img src="/brand/fav.svg" alt="Akonta AI" className="h-full w-full object-contain" />
+                  <img src="/brand/akonta.svg" alt="Akonta AI" className="h-full w-full object-contain" />
                 </div>
                 <div><p className="text-white font-semibold">Akonta AI Chatflow</p><p className="text-green-100 text-xs">Online</p></div>
               </div>

@@ -667,6 +667,8 @@ export const mockGetMonthlySummary = async (userId: string, year: number, month:
 };
 
 export const mockGetMonthlyInsights = async (userId: string, year: number, month: number) => {
+  const user = users.find((entry) => entry.id === userId);
+  const display = resolveDisplayPreferences(user?.currencyCode);
   const txs = transactionsByUser[userId] ?? [];
   const start = new Date(Date.UTC(year, month - 1, 1));
   const end = new Date(Date.UTC(year, month, 1));
@@ -748,13 +750,13 @@ export const mockGetMonthlyInsights = async (userId: string, year: number, month
 
   const highlights: string[] = [];
   if (revenueGap !== undefined && revenueGap < -0.5) {
-    highlights.push(`Sales are below month-to-date target by GHS ${Math.abs(revenueGap).toFixed(2)}.`);
+    highlights.push(`Sales are below month-to-date target by ${formatCurrencyForDisplay(Math.abs(revenueGap), display)}.`);
   }
   if (expenseGap !== undefined && expenseGap > 0.5) {
-    highlights.push(`Expenses are above expected pace by GHS ${expenseGap.toFixed(2)}.`);
+    highlights.push(`Expenses are above expected pace by ${formatCurrencyForDisplay(expenseGap, display)}.`);
   }
   if (overrunCategories.length > 0) {
-    highlights.push(`${overrunCategories[0].category} is over budget by GHS ${overrunCategories[0].variance.toFixed(2)}.`);
+    highlights.push(`${overrunCategories[0].category} is over budget by ${formatCurrencyForDisplay(overrunCategories[0].variance, display)}.`);
   }
   if (highlights.length === 0) {
     highlights.push('Your records are on track this month. Keep logging consistently.');
@@ -818,14 +820,51 @@ export const mockGetCurrentInsights = async (userId: string) => {
 };
 
 const formatAmount = (amount: number): string => Number(amount.toFixed(2)).toString();
+const CURRENCY_LOCALE_MAP: Record<string, string> = {
+  GHS: 'en-GH',
+  NGN: 'en-NG',
+  KES: 'en-KE',
+  UGX: 'en-UG',
+  TZS: 'sw-TZ',
+  XOF: 'fr-CI',
+  XAF: 'fr-CM',
+  USD: 'en-US',
+  EUR: 'en-IE',
+  GBP: 'en-GB'
+};
+const resolveDisplayPreferences = (currencyCode?: string): { currencyCode: string; locale: string } => {
+  const normalized = currencyCode?.trim().toUpperCase() || 'GHS';
+  return {
+    currencyCode: normalized,
+    locale: CURRENCY_LOCALE_MAP[normalized] ?? 'en-GH'
+  };
+};
+const formatCurrencyForDisplay = (amount: number, display: { currencyCode: string; locale: string }): string => {
+  try {
+    return new Intl.NumberFormat(display.locale, {
+      style: 'currency',
+      currency: display.currencyCode,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }).format(amount);
+  } catch {
+    return `${display.currencyCode} ${formatAmount(amount)}`;
+  }
+};
 const toDateKeyUtc = (date: Date): string => date.toISOString().slice(0, 10);
 const startOfUtcDate = (date: Date): Date =>
   new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
 const addUtcDays = (date: Date, days: number): Date =>
   new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
 const dateKeyToUtcDate = (dateKey: string): Date => new Date(`${dateKey}T12:00:00.000Z`);
-const formatDisplayDateFromKey = (dateKey: string): string =>
-  dateKeyToUtcDate(dateKey).toLocaleDateString('en-GH', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+const formatDisplayDateFromKey = (dateKey: string, display: { currencyCode: string; locale: string }): string => {
+  const date = dateKeyToUtcDate(dateKey);
+  try {
+    return date.toLocaleDateString(display.locale, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+  } catch {
+    return date.toLocaleDateString('en-GH', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+  }
+};
 const buildInitialGreeting = (name?: string): string => {
   const firstName = name?.trim().split(/\s+/)[0];
   if (firstName) {
@@ -833,14 +872,14 @@ const buildInitialGreeting = (name?: string): string => {
   }
   return 'Good evening. Let’s log today. How much money inflow came in today?';
 };
-const buildBackfillConsentPrompt = (dateKey: string): string =>
-  `You missed ${formatDisplayDateFromKey(dateKey)}. Add that day now? Reply 1 for Yes or 2 for Skip.`;
-const buildBackfillInflowPrompt = (dateKey: string): string =>
-  `Great. Let’s backfill ${formatDisplayDateFromKey(dateKey)}. How much money inflow came in that day?`;
-const buildInflowQuestionForLogDate = (dateKey?: string): string =>
-  dateKey ? `How much money inflow came in on ${formatDisplayDateFromKey(dateKey)}?` : 'How much money inflow came in today?';
-const buildExpenseQuestionForLogDate = (dateKey?: string): string =>
-  dateKey ? `How much did the business spend on ${formatDisplayDateFromKey(dateKey)}?` : 'How much did the business spend today?';
+const buildBackfillConsentPrompt = (dateKey: string, display: { currencyCode: string; locale: string }): string =>
+  `You missed ${formatDisplayDateFromKey(dateKey, display)}. Add that day now? Reply 1 for Yes or 2 for Skip.`;
+const buildBackfillInflowPrompt = (dateKey: string, display: { currencyCode: string; locale: string }): string =>
+  `Great. Let’s backfill ${formatDisplayDateFromKey(dateKey, display)}. How much money inflow came in that day?`;
+const buildInflowQuestionForLogDate = (display: { currencyCode: string; locale: string }, dateKey?: string): string =>
+  dateKey ? `How much money inflow came in on ${formatDisplayDateFromKey(dateKey, display)}?` : 'How much money inflow came in today?';
+const buildExpenseQuestionForLogDate = (display: { currencyCode: string; locale: string }, dateKey?: string): string =>
+  dateKey ? `How much did the business spend on ${formatDisplayDateFromKey(dateKey, display)}?` : 'How much did the business spend today?';
 const buildIdleAcknowledgementReply = (name?: string): string => {
   const firstName = name?.trim().split(/\s+/)[0];
   if (firstName) {
@@ -1153,9 +1192,13 @@ const buildDraftSummary = (params: {
   expenseAmount?: number;
   expenseEventType?: Transaction['eventType'];
   expenseCategory?: string;
+  display: {
+    currencyCode: string;
+    locale: string;
+  };
 }) => {
   const lines: string[] = [];
-  if (params.salesAmount !== undefined) lines.push(`Inflow: GHS ${params.salesAmount}`);
+  if (params.salesAmount !== undefined) lines.push(`Inflow: ${formatCurrencyForDisplay(params.salesAmount, params.display)}`);
   if (params.salesEventType) {
     if (params.salesEventType === 'other' && params.salesCategory) {
       lines.push(`Inflow type: ${params.salesCategory}`);
@@ -1163,7 +1206,7 @@ const buildDraftSummary = (params: {
       lines.push(`Inflow type: ${humanizeEventType(params.salesEventType)}`);
     }
   }
-  if (params.expenseAmount !== undefined) lines.push(`Expense: GHS ${params.expenseAmount}`);
+  if (params.expenseAmount !== undefined) lines.push(`Expense: ${formatCurrencyForDisplay(params.expenseAmount, params.display)}`);
   if (params.expenseEventType) {
     if (params.expenseEventType === 'other' && params.expenseCategory) {
       lines.push(`Expense type: ${params.expenseCategory}`);
@@ -1175,24 +1218,27 @@ const buildDraftSummary = (params: {
   return lines.join('\n');
 };
 
-const buildMockPostSaveAdvice = async (userId: string): Promise<string | null> => {
+const buildMockPostSaveAdvice = async (
+  userId: string,
+  display: { currencyCode: string; locale: string }
+): Promise<string | null> => {
   const insights = await mockGetCurrentInsights(userId);
   const advice: string[] = [];
   const revenueGap = insights.targetStatus.revenueGapToDate;
   const expenseGap = insights.expenseOverrun.varianceByNow;
 
   if (insights.targetStatus.revenueStatus === 'behind' && revenueGap !== undefined) {
-    advice.push(`Sales are behind pace by GHS ${formatAmount(Math.abs(revenueGap))}. Prioritize high-turnover items this week.`);
+    advice.push(`Sales are behind pace by ${formatCurrencyForDisplay(Math.abs(revenueGap), display)}. Prioritize high-turnover items this week.`);
   } else if (insights.targetStatus.revenueStatus === 'ahead' && revenueGap !== undefined) {
-    advice.push(`Sales are ahead of pace by GHS ${formatAmount(revenueGap)}. Keep this consistency through month-end.`);
+    advice.push(`Sales are ahead of pace by ${formatCurrencyForDisplay(revenueGap, display)}. Keep this consistency through month-end.`);
   }
 
   if (insights.expenseOverrun.isOverrun) {
     if (expenseGap !== undefined && expenseGap > 0) {
-      advice.push(`Expenses are above expected pace by GHS ${formatAmount(expenseGap)}. Tighten spending on non-urgent costs.`);
+      advice.push(`Expenses are above expected pace by ${formatCurrencyForDisplay(expenseGap, display)}. Tighten spending on non-urgent costs.`);
     } else if (insights.expenseOverrun.overrunCategories.length > 0) {
       const top = insights.expenseOverrun.overrunCategories[0];
-      advice.push(`${top.category} is over budget by GHS ${formatAmount(top.variance)}. Review that line item first.`);
+      advice.push(`${top.category} is over budget by ${formatCurrencyForDisplay(top.variance, display)}. Review that line item first.`);
     }
   }
 
@@ -1217,6 +1263,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
   const session = conversationSessionsByUser[userId] ?? { step: 'idle' as const };
   conversationSessionsByUser[userId] = session;
   const currentUser = users.find((user) => user.id === userId);
+  const display = resolveDisplayPreferences(currentUser?.currencyCode);
   const trimmed = message.trim();
   const lower = trimmed.toLowerCase();
   const logDate = resolveConversationLogDate(session.logDateKey);
@@ -1316,22 +1363,22 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
       session.pendingSalesTypeLabel = undefined;
       session.salesTypeConfirmed = false;
       session.step = 'ask_sales';
-      botReply = `Back to inflow amount. ${buildInflowQuestionForLogDate(session.logDateKey)} (Reply NO if there was no inflow.)`;
+      botReply = `Back to inflow amount. ${buildInflowQuestionForLogDate(display, session.logDateKey)} (Reply NO if there was no inflow.)`;
     } else if (session.step === 'ask_expense_type' || session.step === 'confirm_expense_type_custom' || session.step === 'ask_expense_category') {
       session.pendingExpenseTypeLabel = undefined;
       session.expenseTypeConfirmed = false;
       session.step = 'ask_expense';
-      botReply = `Back to expense amount. ${buildExpenseQuestionForLogDate(session.logDateKey)}`;
+      botReply = `Back to expense amount. ${buildExpenseQuestionForLogDate(display, session.logDateKey)}`;
     } else if (session.step === 'await_confirm') {
       session.pendingSalesTypeLabel = undefined;
       session.pendingExpenseTypeLabel = undefined;
       session.salesTypeConfirmed = false;
       session.expenseTypeConfirmed = false;
       session.step = 'ask_sales';
-      botReply = `Back to edit mode. ${buildInflowQuestionForLogDate(session.logDateKey)} (Reply NO if there was no inflow.)`;
+      botReply = `Back to edit mode. ${buildInflowQuestionForLogDate(display, session.logDateKey)} (Reply NO if there was no inflow.)`;
     } else {
       session.step = 'ask_sales';
-      botReply = `${buildInflowQuestionForLogDate(session.logDateKey)} (Reply NO if there was no inflow.)`;
+      botReply = `${buildInflowQuestionForLogDate(display, session.logDateKey)} (Reply NO if there was no inflow.)`;
     }
   }
 
@@ -1384,7 +1431,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
         if (missedDateKey) {
           session.pendingBackfillDateKey = missedDateKey;
           session.step = 'ask_backfill_consent';
-          botReply = buildBackfillConsentPrompt(missedDateKey);
+          botReply = buildBackfillConsentPrompt(missedDateKey, display);
         } else {
           session.pendingBackfillDateKey = undefined;
           session.step = 'ask_sales';
@@ -1442,13 +1489,13 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
 
       if (!session.salesDraftId) {
         session.step = 'ask_sales';
-        botReply = `I noted the expense draft. ${buildInflowQuestionForLogDate(session.logDateKey)} Reply NO if there was no inflow.`;
+        botReply = `I noted the expense draft. ${buildInflowQuestionForLogDate(display, session.logDateKey)} Reply NO if there was no inflow.`;
       } else if (!session.salesTypeConfirmed) {
         session.step = 'ask_sales_type';
         botReply = buildSalesTypePrompt('Noted.', customInflowItems);
       } else if (!session.expenseDraftId) {
         session.step = 'ask_expense';
-        botReply = `Recorded draft inflow. ${buildExpenseQuestionForLogDate(session.logDateKey)}`;
+        botReply = `Recorded draft inflow. ${buildExpenseQuestionForLogDate(display, session.logDateKey)}`;
       } else if (!session.expenseTypeConfirmed) {
         session.step = 'ask_expense_type';
         botReply = buildExpenseTypePrompt('Recorded draft expense.', customExpenseItems);
@@ -1466,7 +1513,8 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
             salesCategory: session.salesCategory,
             expenseAmount: expenseDraft?.amount ?? 0,
             expenseEventType: session.expenseEventType,
-            expenseCategory: expenseDraft?.category ?? session.expenseCategory
+            expenseCategory: expenseDraft?.category ?? session.expenseCategory,
+            display
           })}\n\n${buildAwaitConfirmPrompt()}`;
         }
       }
@@ -1480,14 +1528,14 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
       session.logDateKey = backfillDateKey;
       session.pendingBackfillDateKey = undefined;
       session.step = 'ask_sales';
-      botReply = buildBackfillInflowPrompt(backfillDateKey);
+      botReply = buildBackfillInflowPrompt(backfillDateKey, display);
     } else if (isBackfillNo(trimmed)) {
       session.logDateKey = undefined;
       session.pendingBackfillDateKey = undefined;
       session.step = 'ask_sales';
       botReply = 'No problem. How much money inflow came in today?';
     } else {
-      botReply = `${buildBackfillConsentPrompt(backfillDateKey)} Reply with 1 or 2.`;
+      botReply = `${buildBackfillConsentPrompt(backfillDateKey, display)} Reply with 1 or 2.`;
     }
   } else if (session.step === 'ask_sales') {
     if (parseNoValue(trimmed)) {
@@ -1499,23 +1547,27 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
 
       if (!session.expenseDraftId) {
         session.step = 'ask_expense';
-        botReply = `Inflow recorded as GHS 0. ${buildExpenseQuestionForLogDate(session.logDateKey)}`;
+        botReply = `Inflow recorded as ${formatCurrencyForDisplay(0, display)}. ${buildExpenseQuestionForLogDate(display, session.logDateKey)}`;
       } else if (!session.expenseTypeConfirmed) {
         const expenseDraft = findTransaction(session.expenseDraftId);
         session.step = 'ask_expense_type';
-        botReply = buildExpenseTypePrompt(`Inflow recorded as GHS 0. Recorded draft expense: GHS ${expenseDraft?.amount ?? 0}.`, customExpenseItems);
+        botReply = buildExpenseTypePrompt(
+          `Inflow recorded as ${formatCurrencyForDisplay(0, display)}. Recorded draft expense: ${formatCurrencyForDisplay(expenseDraft?.amount ?? 0, display)}.`,
+          customExpenseItems
+        );
       } else {
         const expenseDraft = findTransaction(session.expenseDraftId);
         if (!expenseDraft?.category && (expenseDraft?.amount ?? 0) > 0) {
           session.step = 'ask_expense_category';
-          botReply = `Inflow recorded as GHS 0. Recorded draft expense: GHS ${expenseDraft?.amount ?? 0}. What was it spent on?`;
+          botReply = `Inflow recorded as ${formatCurrencyForDisplay(0, display)}. Recorded draft expense: ${formatCurrencyForDisplay(expenseDraft?.amount ?? 0, display)}. What was it spent on?`;
         } else {
           session.step = 'await_confirm';
           botReply = `Draft summary:\n${buildDraftSummary({
             salesAmount: 0,
             expenseAmount: expenseDraft?.amount,
             expenseEventType: session.expenseEventType,
-            expenseCategory: expenseDraft?.category ?? session.expenseCategory
+            expenseCategory: expenseDraft?.category ?? session.expenseCategory,
+            display
           })}\n\n${buildAwaitConfirmPrompt()}`;
         }
       }
@@ -1528,7 +1580,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
       if (shouldTreatAsExpenseFirst) {
         const expenseAmount = expenseParsed?.amount ?? parseAmount(trimmed);
         if (expenseAmount === null) {
-          botReply = `If this is an expense, send amount + label (example: "230 transport"). Otherwise, ${buildInflowQuestionForLogDate(session.logDateKey)}`;
+          botReply = `If this is an expense, send amount + label (example: "230 transport"). Otherwise, ${buildInflowQuestionForLogDate(display, session.logDateKey)}`;
         } else {
           const expenseEventType = explicitExpenseEvent ?? session.expenseEventType ?? 'operating_expense';
           const expenseCategory = expenseParsed?.category
@@ -1551,19 +1603,19 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
 
           if (!session.expenseTypeConfirmed) {
             session.step = 'ask_expense_type';
-            botReply = buildExpenseTypePrompt(`Recorded draft expense: GHS ${expenseAmount}.`, customExpenseItems);
+            botReply = buildExpenseTypePrompt(`Recorded draft expense: ${formatCurrencyForDisplay(expenseAmount, display)}.`, customExpenseItems);
           } else if (!session.expenseCategory && expenseAmount > 0) {
             session.step = 'ask_expense_category';
             botReply = `Recorded expense type as ${humanizeEventType(session.expenseEventType)}. What was it spent on?`;
           } else {
             session.step = 'ask_sales';
-            botReply = `Recorded draft expense: GHS ${expenseAmount}. ${buildInflowQuestionForLogDate(session.logDateKey)} Reply NO if there was no inflow.`;
+            botReply = `Recorded draft expense: ${formatCurrencyForDisplay(expenseAmount, display)}. ${buildInflowQuestionForLogDate(display, session.logDateKey)} Reply NO if there was no inflow.`;
           }
         }
       } else {
         const amount = revenueParsed?.amount ?? parseAmount(trimmed);
         if (amount === null) {
-          botReply = 'Please send the money inflow amount in cedis so I can save it as draft. Example: "Inflow 850". You can also reply NO if there was no inflow.';
+          botReply = `Please send the money inflow amount in ${display.currencyCode} so I can save it as draft. Example: "Inflow 850". You can also reply NO if there was no inflow.`;
         } else {
           const salesEventType = explicitSalesEvent ?? session.salesEventType ?? 'cash_sale';
           const sales = await upsertDraft({
@@ -1588,8 +1640,8 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
           session.pendingSalesTypeLabel = undefined;
           session.step = session.salesTypeConfirmed ? 'ask_expense' : 'ask_sales_type';
           botReply = session.step === 'ask_sales_type'
-            ? buildSalesTypePrompt(`Recorded draft inflow: GHS ${amount}.`, customInflowItems)
-            : `Recorded draft inflow: GHS ${amount}. ${buildExpenseQuestionForLogDate(session.logDateKey)} (Reply NO if there was no expense.)`;
+            ? buildSalesTypePrompt(`Recorded draft inflow: ${formatCurrencyForDisplay(amount, display)}.`, customInflowItems)
+            : `Recorded draft inflow: ${formatCurrencyForDisplay(amount, display)}. ${buildExpenseQuestionForLogDate(display, session.logDateKey)} (Reply NO if there was no expense.)`;
         }
       }
     }
@@ -1630,7 +1682,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
       session.salesTypeConfirmed = true;
       session.pendingSalesTypeLabel = undefined;
       session.step = 'ask_expense';
-      botReply = `Inflow type recorded as ${inflowTypeLabel}. ${buildExpenseQuestionForLogDate(session.logDateKey)}`;
+      botReply = `Inflow type recorded as ${inflowTypeLabel}. ${buildExpenseQuestionForLogDate(display, session.logDateKey)}`;
     }
   } else if (session.step === 'confirm_sales_type_custom') {
     const pendingLabel = session.pendingSalesTypeLabel?.trim();
@@ -1654,7 +1706,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
       session.salesTypeConfirmed = true;
       session.pendingSalesTypeLabel = undefined;
       session.step = 'ask_expense';
-      botReply = `Inflow type recorded as ${savedLabel}. ${buildExpenseQuestionForLogDate(session.logDateKey)}`;
+      botReply = `Inflow type recorded as ${savedLabel}. ${buildExpenseQuestionForLogDate(display, session.logDateKey)}`;
     } else if (parseNoResponse(trimmed)) {
       session.pendingSalesTypeLabel = undefined;
       session.step = 'ask_sales_type';
@@ -1675,12 +1727,13 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
         salesAmount: salesDraft?.amount,
         salesEventType: session.salesEventType,
         salesCategory: session.salesCategory,
-        expenseAmount: 0
+        expenseAmount: 0,
+        display
       })}\n\n${buildAwaitConfirmPrompt()}`;
     } else {
       const amount = expenseParsed?.amount ?? parseAmount(trimmed);
       if (amount === null) {
-        botReply = 'Please send the expense amount in cedis, or type NO if there was no expense. Example: "Spent 200".';
+        botReply = `Please send the expense amount in ${display.currencyCode}, or type NO if there was no expense. Example: "Spent 200".`;
       } else {
         const expenseEventType = explicitExpenseEvent ?? session.expenseEventType ?? 'operating_expense';
         const expenseCategory = expenseParsed?.category
@@ -1703,7 +1756,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
 
         if (!session.expenseTypeConfirmed) {
           session.step = 'ask_expense_type';
-          botReply = buildExpenseTypePrompt(`Recorded draft expense: GHS ${amount}.`, customExpenseItems);
+          botReply = buildExpenseTypePrompt(`Recorded draft expense: ${formatCurrencyForDisplay(amount, display)}.`, customExpenseItems);
         } else if (!session.expenseCategory && amount > 0) {
           session.step = 'ask_expense_category';
           botReply = `Recorded expense type as ${humanizeEventType(session.expenseEventType)}. What was it spent on?`;
@@ -1716,7 +1769,8 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
             salesCategory: session.salesCategory,
             expenseAmount: amount,
             expenseEventType: session.expenseEventType,
-            expenseCategory: session.expenseCategory
+            expenseCategory: session.expenseCategory,
+            display
           })}\n\n${buildAwaitConfirmPrompt()}`;
         }
       }
@@ -1771,7 +1825,8 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
           salesCategory: session.salesCategory,
           expenseAmount: expenseDraftLatest?.amount,
           expenseEventType: session.expenseEventType,
-          expenseCategory: session.expenseCategory
+          expenseCategory: session.expenseCategory,
+          display
         })}\n\n${buildAwaitConfirmPrompt()}`;
       }
     }
@@ -1805,7 +1860,8 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
         salesCategory: session.salesCategory,
         expenseAmount: expenseDraftLatest?.amount,
         expenseEventType: session.expenseEventType,
-        expenseCategory: session.expenseCategory
+        expenseCategory: session.expenseCategory,
+        display
       })}\n\n${buildAwaitConfirmPrompt()}`;
     } else if (parseNoResponse(trimmed)) {
       session.pendingExpenseTypeLabel = undefined;
@@ -1845,7 +1901,8 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
         salesCategory: session.salesCategory,
         expenseAmount: updated.amount,
         expenseEventType: session.expenseEventType,
-        expenseCategory: updated.category
+        expenseCategory: updated.category,
+        display
       })}\n\n${buildAwaitConfirmPrompt()}`;
     }
   } else if (session.step === 'await_confirm') {
@@ -1871,7 +1928,7 @@ export const mockPostChatEntry = async (userId: string, message: string) => {
       session.pendingBackfillDateKey = undefined;
       session.pendingSalesTypeLabel = undefined;
       session.pendingExpenseTypeLabel = undefined;
-      const advice = await buildMockPostSaveAdvice(userId);
+      const advice = await buildMockPostSaveAdvice(userId, display);
       botReply = advice
         ? `Saved. Your entries are now confirmed.\n\n${advice}\n\nSend another message when you are ready to log more.`
         : 'Saved. Your entries are now confirmed. Send another message when you are ready to log more.';

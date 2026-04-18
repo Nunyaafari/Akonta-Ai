@@ -71,6 +71,32 @@ const endOfUtcMonth = (year: number, month: number) => {
 };
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const CURRENCY_LOCALE_MAP: Record<string, string> = {
+  GHS: 'en-GH',
+  NGN: 'en-NG',
+  KES: 'en-KE',
+  UGX: 'en-UG',
+  TZS: 'sw-TZ',
+  XOF: 'fr-CI',
+  XAF: 'fr-CM',
+  USD: 'en-US',
+  EUR: 'en-IE',
+  GBP: 'en-GB'
+};
+const formatCurrency = (amount: number, currencyCode?: string): string => {
+  const normalized = currencyCode?.trim().toUpperCase() || 'GHS';
+  const locale = CURRENCY_LOCALE_MAP[normalized] ?? 'en-GH';
+  try {
+    return new Intl.NumberFormat(locale, {
+      style: 'currency',
+      currency: normalized,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }).format(amount);
+  } catch {
+    return `${normalized} ${amount.toFixed(2)}`;
+  }
+};
 
 const sumAmount = (rows: Transaction[]) => rows.reduce((sum, row) => sum + row.amount, 0);
 
@@ -276,20 +302,20 @@ const buildHighlights = (insights: {
   targetStatus: TargetStatusInsight;
   expenseOverrun: ExpenseOverrunInsight;
   creditReadiness: CreditReadinessInsight;
-}): string[] => {
+}, currencyCode?: string): string[] => {
   const lines: string[] = [];
 
   if (insights.targetStatus.revenueStatus === 'behind' && insights.targetStatus.revenueGapToDate !== undefined) {
-    lines.push(`Sales are below month-to-date target by GHS ${Math.abs(insights.targetStatus.revenueGapToDate).toFixed(2)}.`);
+    lines.push(`Sales are below month-to-date target by ${formatCurrency(Math.abs(insights.targetStatus.revenueGapToDate), currencyCode)}.`);
   }
 
   if (insights.expenseOverrun.isOverrun && insights.expenseOverrun.varianceByNow !== undefined) {
-    lines.push(`Expenses are above expected pace by GHS ${insights.expenseOverrun.varianceByNow.toFixed(2)}.`);
+    lines.push(`Expenses are above expected pace by ${formatCurrency(insights.expenseOverrun.varianceByNow, currencyCode)}.`);
   }
 
   if (insights.expenseOverrun.overrunCategories.length > 0) {
     const top = insights.expenseOverrun.overrunCategories[0];
-    lines.push(`${top.category} is over budget by GHS ${top.variance.toFixed(2)}.`);
+    lines.push(`${top.category} is over budget by ${formatCurrency(top.variance, currencyCode)}.`);
   }
 
   if (insights.creditReadiness.level === 'strong') {
@@ -321,7 +347,7 @@ export const getMonthlyInsights = async (params: {
   const elapsedDate = isCurrentPeriod ? now : periodEnd;
   const daysElapsed = clamp(elapsedDate.getUTCDate(), 1, daysInMonth);
 
-  const [transactions, budgets] = await Promise.all([
+  const [transactions, budgets, user] = await Promise.all([
     db.transaction.findMany({
       where: {
         userId: params.userId,
@@ -339,6 +365,10 @@ export const getMonthlyInsights = async (params: {
         periodType: 'monthly',
         periodStart
       }
+    }),
+    db.user.findUnique({
+      where: { id: params.userId },
+      select: { currencyCode: true }
     })
   ]);
 
@@ -364,7 +394,7 @@ export const getMonthlyInsights = async (params: {
     targetStatus,
     expenseOverrun,
     creditReadiness
-  });
+  }, user?.currencyCode);
 
   return {
     period: {

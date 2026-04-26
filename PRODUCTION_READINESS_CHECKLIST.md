@@ -6,7 +6,7 @@ Use this as a release gate. Every item must be marked **Pass** with evidence bef
 | Area | Owner | Backup | Status |
 |---|---|---|---|
 | Backend security/auth | Backend engineer | Tech lead | Pass |
-| Frontend auth/workspace UX | Frontend engineer | Product engineer | Pending |
+| Frontend auth/workspace UX | Frontend engineer | Product engineer | In progress |
 | Infrastructure/DevOps | DevOps engineer | Backend engineer | Pending |
 | Data migration + rollback | Backend engineer | DevOps engineer | In progress |
 | QA and release signoff | QA lead | Product lead | Pending |
@@ -36,7 +36,19 @@ Use this as a release gate. Every item must be marked **Pass** with evidence bef
 |---|---|---|---|---|
 | OTP login journey | User can request OTP, verify, refresh token, logout in UI | E2E run + screenshots | Frontend | In progress |
 | Workspace management UI | Owner can invite member, view roster, update role/status | UI walkthrough + API logs | Frontend | In progress |
-| Role-aware UI gating | Cashier/Viewer cannot access owner-only controls in UI | E2E matrix | Frontend/QA | Pending |
+| Role-aware UI gating | Cashier/Viewer cannot access owner-only controls in UI | E2E matrix | Frontend/QA | In progress |
+
+### Item 2 Progress (2026-04-26)
+- Existing-user entry points are now explicit in the frontend:
+1. Landing page shows `Sign In` in header and hero CTA, separate from `Create Account`.
+2. OTP auth screen now includes an explicit `Existing user` sign-in panel and a distinct `New business owner` create-account path.
+- Workspace member management is available in `Settings -> Team Workspace` for owners:
+1. Invite teammate by name + phone/email + role.
+2. View roster with role/status.
+3. Update non-owner role and active/inactive status.
+- Role-gating test matrix created:
+1. `QA_ROLE_GATING_E2E_MATRIX.md`
+2. Next step is execution evidence (screenshots + network traces) to move from In progress to Pass.
 
 ## 3) Data Migration & Integrity (Release Blocker)
 | Check | Pass Criteria | Evidence | Owner | Status |

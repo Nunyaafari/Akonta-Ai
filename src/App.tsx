@@ -1652,6 +1652,19 @@ export default function App() {
             <p className="mt-2 text-sm text-gray-500">
               Use your team phone number. We will verify with OTP and open your workspace role.
             </p>
+            <div className="mt-4 grid gap-2 sm:grid-cols-2">
+              <div className="rounded-2xl border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-800">
+                <p className="font-semibold">Existing user</p>
+                <p>Enter your phone and request OTP to sign in.</p>
+              </div>
+              <button
+                onClick={() => setView('onboarding')}
+                className="rounded-2xl border border-gray-200 bg-white px-3 py-2 text-left text-xs text-gray-700 hover:bg-gray-50"
+              >
+                <p className="font-semibold">New business owner</p>
+                <p>Create account to set up your workspace.</p>
+              </button>
+            </div>
 
             <div className="mt-5 space-y-3">
               <label className="block">
@@ -1722,7 +1735,10 @@ export default function App() {
           </div>
 
           <div className="mt-4 rounded-2xl border border-gray-200 bg-white px-4 py-4 text-sm text-gray-600">
-            New business owner? <button onClick={() => setView('onboarding')} className="font-semibold text-green-700 hover:text-green-800">Create account</button>
+            Need a new workspace?{' '}
+            <button onClick={() => setView('onboarding')} className="font-semibold text-green-700 hover:text-green-800">
+              Create account
+            </button>
           </div>
         </div>
       </div>

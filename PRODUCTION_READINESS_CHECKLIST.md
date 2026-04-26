@@ -77,7 +77,7 @@ Use this as a release gate. Every item must be marked **Pass** with evidence bef
 | Check | Pass Criteria | Evidence | Owner | Status |
 |---|---|---|---|---|
 | Integration tests | Workspace invite, OTP, auth refresh, approval flow, chat regression all passing | CI artifact | Backend | Pass |
-| E2E tests | Core user journeys pass on desktop/mobile | CI artifact | QA/Frontend | Pending |
+| E2E tests | Core user journeys pass on desktop/mobile | CI artifact | QA/Frontend | In progress |
 | Security tests | Cross-workspace access denied for all sensitive routes | CI artifact | Backend/QA | Pass |
 
 ### Item 3 CI Evidence (2026-04-26)
@@ -87,6 +87,34 @@ Use this as a release gate. Every item must be marked **Pass** with evidence bef
 3. Event: `push` on `main`
 4. Result: `completed / success`
 5. URL: `https://github.com/Nunyaafari/Akonta-Ai/actions/runs/24954068727`
+
+### Item 6 Progress (2026-04-26)
+- Added automated frontend E2E smoke suite with Playwright:
+1. `playwright.config.ts` (starts backend + frontend web servers for test run)
+2. `e2e/workspace-auth-smoke.spec.ts` (covers OTP login, owner invite, workspace switch, cashier/viewer restrictions, logout+refresh revocation)
+- Added CI workflow for frontend smoke gate:
+1. `.github/workflows/frontend-e2e.yml`
+2. PostgreSQL service + Playwright browser install + `npm run test:e2e:ci`
+- Local verification:
+1. `npm run test:e2e -- --list` passed (suite discovered).
+2. `npm run test:e2e:ci` blocked locally because PostgreSQL was not running on `127.0.0.1:5432`.
+
+### Item 3 Progress (2026-04-26)
+- Added executable staging migration rehearsal automation:
+1. `backend/scripts/staging-migration-rehearsal.sh`
+2. `backend/scripts/sql/rehearsal_baseline_metrics.sql`
+3. `backend/scripts/sql/rehearsal_invariants.sql`
+4. `backend/STAGING_MIGRATION_REHEARSAL.md`
+- Rehearsal script implements:
+1. Snapshot backup (`pg_dump`)
+2. Restore to work DB (`pg_restore`)
+3. Migration apply (`prisma migrate deploy`)
+4. Parity and invariant checks
+5. Rollback restore drill + parity recheck
+6. Timestamped evidence artifact bundle in `backend/rehearsal-artifacts/<timestamp>/`
+- Local execution status:
+1. Script invocation attempted.
+2. Blocked due missing PostgreSQL CLI tools (`psql`, `pg_dump`, `pg_restore`) on current machine.
 
 ### Item 3 Progress (2026-04-25)
 - Added CI workflow for backend integration/security suites:

@@ -11,7 +11,8 @@
     "prisma:studio": "prisma studio",
     "test:integration": "tsx scripts/integration-workspace-chat.ts",
     "test:security": "tsx scripts/integration-security-rbac.ts",
-    "test:ci": "npm run test:integration && npm run test:security"
+    "test:ci": "npm run test:integration && npm run test:security",
+    "rehearsal:staging-migration": "bash ./scripts/staging-migration-rehearsal.sh"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",

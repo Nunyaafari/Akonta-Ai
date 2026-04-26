@@ -1,11 +1,14 @@
 node_modules/
 dist/
+playwright-report/
+test-results/
 
 backend/node_modules/
 backend/dist/
 backend/coverage/
 backend/.turbo/
 backend/*.tsbuildinfo
+backend/rehearsal-artifacts/
 
 .env
 .env.*

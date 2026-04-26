@@ -42,3 +42,7 @@ Scope: Validate that UI controls and behavior match workspace role permissions.
 1. `backend/scripts/integration-security-rbac.ts`
 2. `npm run test:security`
 3. GitHub Actions workflow `Backend Integration`
+- Frontend smoke automation now in:
+1. `e2e/workspace-auth-smoke.spec.ts`
+2. `npm run test:e2e:ci`
+3. GitHub Actions workflow `Frontend E2E Smoke`

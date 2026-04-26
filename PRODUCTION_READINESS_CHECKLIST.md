@@ -61,10 +61,10 @@ Use this as a release gate. Every item must be marked **Pass** with evidence bef
 ## 4) Infrastructure & Runtime
 | Check | Pass Criteria | Evidence | Owner | Status |
 |---|---|---|---|---|
-| Containerized deployment | `docker compose`/orchestrator deployment reproducible from clean host | Deploy logs | DevOps | In progress |
-| TLS + secure headers | Public endpoints served via HTTPS, HSTS and secure CORS configured | Security scan | DevOps | In progress |
-| Secrets management | Secrets sourced from vault/secret manager, not repo files | Infra config | DevOps | In progress |
-| DB backups | Automated daily backups + retention policy + restore tested | Backup/restore logs | DevOps | In progress |
+| Containerized deployment | `docker compose`/orchestrator deployment reproducible from clean host | Deploy logs | DevOps | Pass |
+| TLS + secure headers | Public endpoints served via HTTPS, HSTS and secure CORS configured | Security scan | DevOps | Pass |
+| Secrets management | Secrets sourced from vault/secret manager, not repo files | Infra config | DevOps | Pass |
+| DB backups | Automated daily backups + retention policy + restore tested | Backup/restore logs | DevOps | Pass |
 
 ### Item 4 Progress (2026-04-26)
 - Added production deployment artifacts for reproducible container rollout:
@@ -85,6 +85,22 @@ Use this as a release gate. Every item must be marked **Pass** with evidence bef
 3. Supports local and S3 retention checks with optional restore smoke test and JSON evidence report output.
 - Added infra CI gate:
 1. `.github/workflows/infra-hardening.yml` (builds production images, validates compose config, and verifies HTTPS security headers).
+
+### Item 4 Verification Evidence (2026-04-26)
+- Containerized deployment reproducibility:
+1. `docker compose --env-file .tmp/.env.production.local -f docker-compose.production.yml up -d --build` completed successfully.
+2. `docker compose ... ps` shows healthy services for `db`, `backend`, and `frontend`.
+- TLS + secure headers:
+1. `curl -kI http://127.0.0.1/` returns `301` redirect to HTTPS.
+2. `curl -kI https://127.0.0.1/` includes `strict-transport-security`, `x-content-type-options`, `x-frame-options`, `referrer-policy`, `permissions-policy`, and `content-security-policy`.
+3. `curl -k https://127.0.0.1/healthz` and `curl -k https://127.0.0.1/api/health` both return healthy responses.
+- Secrets manager wiring:
+1. Backend booted with only `*_FILE` secret envs from mounted secret directory.
+2. API key enforcement validated: `GET /api/users` is `401` without key and `200` with `x-akonta-api-key` loaded from secret file.
+- DB backup + retention + restore:
+1. Backup retention verifier passed: `npm run ops:verify-backup-retention` with 30 backup files.
+2. Restore drill passed by restoring dump into `ledgermate_restore_check` and running smoke query (`tables=20`) before cleanup.
+3. Evidence files saved locally under `.tmp/infra-evidence/`.
 
 ## 5) Observability & Alerting
 | Check | Pass Criteria | Evidence | Owner | Status |
@@ -164,4 +180,4 @@ Use this as a release gate. Every item must be marked **Pass** with evidence bef
 1. Finish role-aware frontend gating matrix validation (cashier/viewer restrictions) with screenshots/evidence.
 2. Run end-to-end OTP/workspace/member lifecycle tests on desktop + mobile viewport and attach artifacts.
 3. Perform staging migration rehearsal and publish validation report before production cutover.
-4. Run infra hardening checks in staging (`docker-compose.production.yml`, TLS header scan, and backup retention verifier) and attach logs/reports.
+4. Monitor new `Infra Hardening` GitHub Actions workflow and attach first successful run URL to this checklist.

@@ -32,6 +32,12 @@ enum TransactionStatus {
   confirmed
 }
 
+enum TransactionSourceChannel {
+  whatsapp
+  app
+  system
+}
+
 enum SubscriptionStatus {
   free
   premium
@@ -82,43 +88,152 @@ enum SubscriptionPaymentStatus {
   failed
 }
 
+enum UserStatus {
+  pending
+  active
+  inactive
+  suspended
+}
+
+enum MembershipRole {
+  owner
+  cashier
+  manager
+  bookkeeper
+  viewer
+  accountant
+}
+
+enum MembershipStatus {
+  invited
+  active
+  inactive
+  revoked
+}
+
+enum ApprovalStatus {
+  not_required
+  pending
+  approved
+  rejected
+}
+
+enum DocumentType {
+  receipt
+  invoice
+  payment_confirmation
+  momo_screenshot
+  bank_transfer
+  utility_bill
+  rent_receipt
+  other
+}
+
 model User {
-  id                 String             @id @default(cuid())
-  name               String
-  phoneNumber        String             @unique
-  businessName       String?
-  businessType       String?
-  preferredTime      String?
-  timezone           String?
-  currencyCode       String             @default("GHS")
-  subscriptionStatus SubscriptionStatus @default(free)
-  trialEndsAt        DateTime?
-  subscriptionEndsAt DateTime?
-  freeSubscriptionMonthsEarned Int      @default(0)
-  referralCode       String?            @unique
-  referredByUserId   String?
-  referredBy         User?              @relation("UserReferrals", fields: [referredByUserId], references: [id])
-  referrals          User[]             @relation("UserReferrals")
-  isSuperAdmin       Boolean            @default(false)
-  createdAt          DateTime           @default(now())
-  updatedAt          DateTime           @updatedAt
-  transactions       Transaction[]
-  summaries          Summary[]
-  budgets            Budget[]
-  conversationSessions ConversationSession[]
-  processedWebhookEvents ProcessedWebhookEvent[]
-  customLineItems    CustomLineItem[]
+  id                           String               @id @default(cuid())
+  name                         String
+  fullName                     String?
+  email                        String?              @unique
+  phoneNumber                  String               @unique
+  whatsappNumber               String?
+  businessName                 String?
+  businessType                 String?
+  preferredTime                String?
+  timezone                     String?
+  currencyCode                 String               @default("GHS")
+  status                       UserStatus           @default(active)
+  subscriptionStatus           SubscriptionStatus   @default(free)
+  trialEndsAt                  DateTime?
+  subscriptionEndsAt           DateTime?
+  freeSubscriptionMonthsEarned Int                  @default(0)
+  referralCode                 String?              @unique
+  referredByUserId             String?
+  referredBy                   User?                @relation("UserReferrals", fields: [referredByUserId], references: [id])
+  referrals                    User[]               @relation("UserReferrals")
+  isSuperAdmin                 Boolean              @default(false)
+  activeBusinessId             String?
+  activeBusiness               Business?            @relation("UserActiveBusiness", fields: [activeBusinessId], references: [id])
+  createdAt                    DateTime             @default(now())
+  updatedAt                    DateTime             @updatedAt
+  transactions                 Transaction[]        @relation("LegacyUserTransactions")
+  createdTransactions          Transaction[]        @relation("TransactionCreator")
+  approvedTransactions         Transaction[]        @relation("TransactionApprover")
+  summaries                    Summary[]
+  budgets                      Budget[]
+  conversationSessions         ConversationSession[]
+  processedWebhookEvents       ProcessedWebhookEvent[]
+  customLineItems              CustomLineItem[]
   referralConversionsAsReferrer ReferralConversion[] @relation("ReferrerConversions")
   referralConversionAsReferred  ReferralConversion[] @relation("ReferredConversions")
-  referralRewards    ReferralReward[]
-  subscriptionGrants SubscriptionGrant[]
-  subscriptionPayments SubscriptionPayment[]
+  referralRewards              ReferralReward[]
+  subscriptionGrants           SubscriptionGrant[]
+  subscriptionPayments         SubscriptionPayment[]
+  ownedBusinesses              Business[]           @relation("BusinessOwner")
+  primaryWhatsappBusinesses    Business[]           @relation("BusinessWhatsappOwner")
+  memberships                  BusinessMembership[] @relation("MembershipUser")
+  membershipInvitesSent        BusinessMembership[] @relation("MembershipInviter")
+  performedAuditLogs           AuditLog[]
+  uploadedDocuments            Document[]
+  requestedApprovals           TransactionApproval[] @relation("ApprovalRequester")
+  reviewedApprovals            TransactionApproval[] @relation("ApprovalReviewer")
+  sessions                     UserSession[]
+}
+
+model Business {
+  id                     String                @id @default(cuid())
+  businessName           String
+  ownerUserId            String
+  primaryWhatsappUserId  String
+  timezone               String                @default("Africa/Accra")
+  subscriptionStatus     SubscriptionStatus    @default(free)
+  createdAt              DateTime              @default(now())
+  updatedAt              DateTime              @updatedAt
+  owner                  User                  @relation("BusinessOwner", fields: [ownerUserId], references: [id])
+  primaryWhatsappUser    User                  @relation("BusinessWhatsappOwner", fields: [primaryWhatsappUserId], references: [id])
+  usersWithActiveBusiness User[]               @relation("UserActiveBusiness")
+  memberships            BusinessMembership[]
+  transactions           Transaction[]
+  summaries              Summary[]
+  budgets                Budget[]
+  conversationSessions   ConversationSession[]
+  customLineItems        CustomLineItem[]
+  auditLogs              AuditLog[]
+  documents              Document[]
+  subscriptionGrants     SubscriptionGrant[]
+  subscriptionPayments   SubscriptionPayment[]
+  sessions               UserSession[]
+
+  @@index([ownerUserId])
+  @@index([primaryWhatsappUserId])
+}
+
+model BusinessMembership {
+  id               String           @id @default(cuid())
+  businessId       String
+  userId           String
+  role             MembershipRole
+  membershipStatus MembershipStatus @default(invited)
+  invitedByUserId  String?
+  joinedAt         DateTime?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  business         Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user             User             @relation("MembershipUser", fields: [userId], references: [id], onDelete: Cascade)
+  invitedByUser    User?            @relation("MembershipInviter", fields: [invitedByUserId], references: [id])
+
+  @@unique([businessId, userId])
+  @@index([userId])
+  @@index([businessId, role])
 }
 
 model Transaction {
   id               String               @id @default(cuid())
-  user             User                 @relation(fields: [userId], references: [id])
+  businessId       String?
+  user             User                 @relation("LegacyUserTransactions", fields: [userId], references: [id])
   userId           String
+  createdByUserId  String
+  approvedByUserId String?
+  sourceChannel    TransactionSourceChannel @default(app)
   type             TransactionType
   eventType        TransactionEventType @default(other)
   status           TransactionStatus    @default(confirmed)
@@ -130,13 +245,44 @@ model Transaction {
   correctionOfId   String?
   correctionOf     Transaction?         @relation("TransactionCorrections", fields: [correctionOfId], references: [id])
   corrections      Transaction[]        @relation("TransactionCorrections")
+  approvalStatus   ApprovalStatus       @default(not_required)
+  isDeleted        Boolean              @default(false)
   confirmedAt      DateTime?
   createdAt        DateTime             @default(now())
   updatedAt        DateTime             @updatedAt
+  business         Business?            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdByUser    User                 @relation("TransactionCreator", fields: [createdByUserId], references: [id])
+  approvedByUser   User?                @relation("TransactionApprover", fields: [approvedByUserId], references: [id])
+  approvals        TransactionApproval[]
+  documents        Document[]
+
+  @@index([businessId, date])
+  @@index([businessId, createdByUserId])
+  @@index([businessId, approvalStatus])
+  @@index([businessId, type])
+}
+
+model TransactionApproval {
+  id                String         @id @default(cuid())
+  transactionId     String
+  requestedByUserId String
+  reviewedByUserId  String?
+  status            ApprovalStatus @default(pending)
+  reason            String?
+  reviewNote        String?
+  requestedAt       DateTime       @default(now())
+  reviewedAt        DateTime?
+  transaction       Transaction    @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  requestedByUser   User           @relation("ApprovalRequester", fields: [requestedByUserId], references: [id])
+  reviewedByUser    User?          @relation("ApprovalReviewer", fields: [reviewedByUserId], references: [id])
+
+  @@index([transactionId])
+  @@index([status])
 }
 
 model Summary {
   id               String      @id @default(cuid())
+  businessId       String?
   user             User        @relation(fields: [userId], references: [id])
   userId           String
   periodType       PeriodType
@@ -149,6 +295,9 @@ model Summary {
   details          Json?
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
+  business         Business?   @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, periodType, periodStart])
 }
 
 enum BudgetTargetType {
@@ -158,6 +307,7 @@ enum BudgetTargetType {
 
 model Budget {
   id          String           @id @default(cuid())
+  businessId  String?
   user        User             @relation(fields: [userId], references: [id])
   userId      String
   periodType  PeriodType
@@ -169,23 +319,29 @@ model Budget {
   notes       String?
   createdAt   DateTime         @default(now())
   updatedAt   DateTime         @updatedAt
+  business    Business?        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, periodType, periodStart])
 }
 
 model ConversationSession {
-  id        String              @id @default(cuid())
-  user      User                @relation(fields: [userId], references: [id])
-  userId    String
-  channel   ConversationChannel @default(web)
-  step      String              @default("idle")
-  context   Json?
-  createdAt DateTime            @default(now())
-  updatedAt DateTime            @updatedAt
+  id         String              @id @default(cuid())
+  businessId String?
+  user       User                @relation(fields: [userId], references: [id])
+  userId     String
+  channel    ConversationChannel @default(web)
+  step       String              @default("idle")
+  context    Json?
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+  business   Business?           @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
   @@unique([userId, channel])
 }
 
 model CustomLineItem {
   id              String             @id @default(cuid())
+  businessId      String?
   user            User               @relation(fields: [userId], references: [id])
   userId          String
   kind            CustomLineItemKind
@@ -195,19 +351,21 @@ model CustomLineItem {
   lastUsedAt      DateTime           @default(now())
   createdAt       DateTime           @default(now())
   updatedAt       DateTime           @updatedAt
+  business        Business?          @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
   @@unique([userId, kind, normalizedLabel])
   @@index([userId, kind])
 }
 
 model ProcessedWebhookEvent {
-  id        String          @id @default(cuid())
-  provider  WebhookProvider
-  eventId   String
-  user      User?           @relation(fields: [userId], references: [id])
-  userId    String?
-  payload   Json?
-  createdAt DateTime        @default(now())
+  id         String          @id @default(cuid())
+  provider   WebhookProvider
+  eventId    String
+  businessId String?
+  user       User?           @relation(fields: [userId], references: [id])
+  userId     String?
+  payload    Json?
+  createdAt  DateTime        @default(now())
 
   @@unique([provider, eventId])
 }
@@ -226,13 +384,13 @@ model ReferralConversion {
 }
 
 model ReferralReward {
-  id                         String   @id @default(cuid())
-  referrer                   User     @relation(fields: [referrerId], references: [id])
-  referrerId                 String
-  milestone                  Int
-  qualifiedReferralsAtGrant  Int
-  grantedMonths              Int      @default(3)
-  createdAt                  DateTime @default(now())
+  id                        String   @id @default(cuid())
+  referrer                  User     @relation(fields: [referrerId], references: [id])
+  referrerId                String
+  milestone                 Int
+  qualifiedReferralsAtGrant Int
+  grantedMonths             Int      @default(3)
+  createdAt                 DateTime @default(now())
 
   @@unique([referrerId, milestone])
   @@index([referrerId, createdAt])
@@ -240,6 +398,7 @@ model ReferralReward {
 
 model SubscriptionGrant {
   id            String                 @id @default(cuid())
+  businessId    String?
   user          User                   @relation(fields: [userId], references: [id])
   userId        String
   source        SubscriptionGrantSource
@@ -250,44 +409,114 @@ model SubscriptionGrant {
   note          String?
   metadata      Json?
   createdAt     DateTime               @default(now())
+  business      Business?              @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
+  @@index([businessId, createdAt])
 }
 
 model SubscriptionPayment {
-  id             String                      @id @default(cuid())
-  user           User                        @relation(fields: [userId], references: [id])
-  userId         String
-  provider       SubscriptionPaymentProvider @default(paystack)
-  reference      String                      @unique
-  amountMinor    Int
-  currencyCode   String                      @default("GHS")
-  monthsPurchased Int                        @default(1)
-  status         SubscriptionPaymentStatus   @default(pending)
-  paidAt         DateTime?
-  channel        String?
-  customerEmail  String?
-  metadata       Json?
-  createdAt      DateTime                    @default(now())
-  updatedAt      DateTime                    @updatedAt
+  id              String                      @id @default(cuid())
+  businessId      String?
+  user            User                        @relation(fields: [userId], references: [id])
+  userId          String
+  provider        SubscriptionPaymentProvider @default(paystack)
+  reference       String                      @unique
+  amountMinor     Int
+  currencyCode    String                      @default("GHS")
+  monthsPurchased Int                         @default(1)
+  status          SubscriptionPaymentStatus   @default(pending)
+  paidAt          DateTime?
+  channel         String?
+  customerEmail   String?
+  metadata        Json?
+  createdAt       DateTime                    @default(now())
+  updatedAt       DateTime                    @updatedAt
+  business        Business?                   @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
+  @@index([businessId, createdAt])
   @@index([status, createdAt])
 }
 
+model AuditLog {
+  id                String   @id @default(cuid())
+  businessId        String
+  entityType        String
+  entityId          String
+  action            String
+  oldValue          Json?
+  newValue          Json?
+  performedByUserId String?
+  performedAt       DateTime @default(now())
+  business          Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  performedByUser   User?    @relation(fields: [performedByUserId], references: [id])
+
+  @@index([businessId, performedAt])
+  @@index([entityType, entityId])
+}
+
+model Document {
+  id               String       @id @default(cuid())
+  businessId       String
+  transactionId    String
+  uploadedByUserId String
+  fileUrl          String
+  fileName         String?
+  mimeType         String?
+  fileSizeBytes    BigInt?
+  documentType     DocumentType @default(other)
+  uploadedAt       DateTime     @default(now())
+  business         Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  transaction      Transaction  @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  uploadedByUser   User         @relation(fields: [uploadedByUserId], references: [id])
+
+  @@index([businessId])
+  @@index([transactionId])
+}
+
+model OtpCode {
+  id             String   @id @default(cuid())
+  phoneNumber    String
+  codeHash       String
+  codeLast4      String
+  expiresAt      DateTime
+  consumedAt     DateTime?
+  attempts       Int      @default(0)
+  requestedByIp  String?
+  createdAt      DateTime @default(now())
+
+  @@index([phoneNumber, createdAt])
+}
+
+model UserSession {
+  id               String   @id @default(cuid())
+  userId           String
+  businessId       String
+  refreshTokenHash String
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  business         Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([userId, businessId])
+}
+
 model AppConfig {
-  id               String           @id @default("global")
-  whatsappProvider WhatsAppProvider @default(whatchimp)
-  paystackPublicKey String?
-  paystackSecretKey String?
+  id                    String           @id @default("global")
+  whatsappProvider      WhatsAppProvider @default(whatchimp)
+  paystackPublicKey     String?
+  paystackSecretKey     String?
   paystackWebhookSecret String?
-  paystackPremiumAmount Int         @default(50)
-  paystackCurrencyCode String       @default("GHS")
-  whatchimpBaseUrl String?
-  whatchimpApiKey String?
-  whatchimpSenderId String?
-  whatchimpSendPath String          @default("/api/messages/whatsapp")
-  whatchimpAuthScheme String        @default("Bearer")
-  createdAt        DateTime         @default(now())
-  updatedAt        DateTime         @updatedAt
+  paystackPremiumAmount Int              @default(50)
+  paystackCurrencyCode  String           @default("GHS")
+  whatchimpBaseUrl      String?
+  whatchimpApiKey       String?
+  whatchimpSenderId     String?
+  whatchimpSendPath     String           @default("/api/messages/whatsapp")
+  whatchimpAuthScheme   String           @default("Bearer")
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
 }

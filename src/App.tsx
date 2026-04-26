@@ -1,6 +1,22 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AppView, User, ChatMessage, Transaction, SummaryPayload, WhatsAppProvider, Budget, BudgetTargetType, MonthlyInsights, AdminPaymentSettings, AdminWhatsAppSettings } from './types';
+import {
+  AppView,
+  AuthSession,
+  User,
+  ChatMessage,
+  Transaction,
+  SummaryPayload,
+  WhatsAppProvider,
+  Budget,
+  BudgetTargetType,
+  MonthlyInsights,
+  AdminPaymentSettings,
+  AdminWhatsAppSettings,
+  WorkspaceMember,
+  WorkspaceRole,
+  WorkspaceMembershipStatus
+} from './types';
 import { 
   ChartIcon, HistoryIcon,
   SendIcon, TrendingUpIcon, TrendingDownIcon, HomeIcon, 
@@ -13,7 +29,9 @@ import {
 import SalesProfitTrendChart, { type SalesProfitTrendPoint } from './components/SalesProfitTrendChart';
 import {
   activateUserSubscription,
+  clearStoredAuthSession,
   createUser,
+  getStoredAuthSession,
   getAdminAnalytics,
   getAdminPaymentSettings,
   getAdminWhatsAppProvider,
@@ -31,8 +49,18 @@ import {
   registerDemoModeListener,
   setAdminPaymentSettings,
   setAdminWhatsAppProvider,
+  setLegacyUserContext,
   verifySubscriptionPayment,
-  updateUser
+  updateUser,
+  getWorkspaces,
+  getWorkspaceMembers,
+  inviteWorkspaceMember,
+  logoutSession,
+  refreshAuthSession,
+  requestOtp,
+  selectWorkspace,
+  updateWorkspaceMember,
+  verifyOtp
 } from './lib/api';
 import {
   buildCashFlowCsvRows,
@@ -216,6 +244,14 @@ type HistoryDatePreset = 'this_month' | 'last_month' | 'last_90_days' | 'all_tim
 export default function App() {
   const [view, setView] = useState<AppView>('landing');
   const [user, setUser] = useState<User | null>(null);
+  const [authSession, setAuthSession] = useState<AuthSession | null>(null);
+  const [authPhoneNumber, setAuthPhoneNumber] = useState('');
+  const [authOtpCode, setAuthOtpCode] = useState('');
+  const [authOtpExpiresAt, setAuthOtpExpiresAt] = useState<string | null>(null);
+  const [authDevOtpCode, setAuthDevOtpCode] = useState<string | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const [authStep, setAuthStep] = useState<'request' | 'verify'>('request');
+  const [workspaceSelectionId, setWorkspaceSelectionId] = useState<string>('');
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [messages, setMessages] = useState<ChatMessage[]>(chatMessages);
   const [inputValue, setInputValue] = useState('');
@@ -251,6 +287,12 @@ export default function App() {
   const [historyAttachmentFilter, setHistoryAttachmentFilter] = useState<'all' | 'with' | 'without'>('all');
   const [settingsCurrencyCode, setSettingsCurrencyCode] = useState<'GHS' | 'USD' | 'NGN' | 'KES' | 'EUR' | 'GBP'>('GHS');
   const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
+  const [teamNotice, setTeamNotice] = useState<string | null>(null);
+  const [teamInviteName, setTeamInviteName] = useState('');
+  const [teamInvitePhone, setTeamInvitePhone] = useState('');
+  const [teamInviteEmail, setTeamInviteEmail] = useState('');
+  const [teamInviteRole, setTeamInviteRole] = useState<WorkspaceRole>('cashier');
+  const [teamRoleDrafts, setTeamRoleDrafts] = useState<Record<string, WorkspaceRole>>({});
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [isOutboxSyncing, setIsOutboxSyncing] = useState(false);
 
@@ -313,6 +355,29 @@ export default function App() {
     mutationFn: (payload: Partial<User>) => createUser(payload)
   });
 
+  const requestOtpMutation = useMutation({
+    mutationFn: (phoneNumber: string) => requestOtp(phoneNumber)
+  });
+
+  const verifyOtpMutation = useMutation({
+    mutationFn: (payload: { phoneNumber: string; code: string; businessId?: string }) => verifyOtp(payload)
+  });
+
+  const selectWorkspaceMutation = useMutation({
+    mutationFn: (businessId: string) => selectWorkspace(businessId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['workspace-members', user?.id] });
+      queryClient.invalidateQueries({ queryKey: ['workspace-memberships', user?.id] });
+      if (user?.id) {
+        invalidateUserDataQueries(user.id, { includeBudgets: true });
+      }
+    }
+  });
+
+  const logoutMutation = useMutation({
+    mutationFn: () => logoutSession()
+  });
+
   const initializeSubscriptionMutation = useMutation({
     mutationFn: (payload: {
       userId: string;
@@ -335,6 +400,10 @@ export default function App() {
     }
   });
   const isOnboardingSubmitting = createUserMutation.isPending;
+  const isRequestingOtp = requestOtpMutation.isPending;
+  const isVerifyingOtp = verifyOtpMutation.isPending;
+  const isSwitchingWorkspace = selectWorkspaceMutation.isPending;
+  const isLoggingOut = logoutMutation.isPending;
   const isSavingCurrency = updateUserMutation.isPending;
   const isSavingBudget = saveBudgetMutation.isPending;
   const isStartingCheckout = initializeSubscriptionMutation.isPending;
@@ -405,6 +474,42 @@ export default function App() {
     }
   });
 
+  const workspaceMembershipsQuery = useQuery({
+    queryKey: ['workspace-memberships', user?.id],
+    enabled: Boolean(user?.id),
+    queryFn: () => getWorkspaces()
+  });
+
+  const workspaceMembersQuery = useQuery({
+    queryKey: ['workspace-members', user?.id],
+    enabled: Boolean(user?.id),
+    queryFn: () => getWorkspaceMembers()
+  });
+
+  const inviteWorkspaceMemberMutation = useMutation({
+    mutationFn: (payload: {
+      fullName: string;
+      phoneNumber?: string;
+      email?: string;
+      role: WorkspaceRole;
+    }) => inviteWorkspaceMember(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['workspace-members', user?.id] });
+      queryClient.invalidateQueries({ queryKey: ['workspace-memberships', user?.id] });
+    }
+  });
+
+  const updateWorkspaceMemberMutation = useMutation({
+    mutationFn: (payload: {
+      membershipId: string;
+      updates: { role?: WorkspaceRole; status?: WorkspaceMembershipStatus };
+    }) => updateWorkspaceMember(payload.membershipId, payload.updates),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['workspace-members', user?.id] });
+      queryClient.invalidateQueries({ queryKey: ['workspace-memberships', user?.id] });
+    }
+  });
+
   const adminAnalyticsQuery = useQuery({
     queryKey: ['admin-analytics', user?.id],
     enabled: isSuperAdmin,
@@ -456,6 +561,8 @@ export default function App() {
   const currentInsights = currentInsightsQuery.data ?? null;
   const referralProgress = referralProgressQuery.data ?? null;
   const budgets = budgetsQuery.data ?? [];
+  const workspaceMemberships = workspaceMembershipsQuery.data ?? [];
+  const workspaceMembers = workspaceMembersQuery.data ?? [];
   const adminAnalytics = adminAnalyticsQuery.data ?? null;
   const adminProviderInfo = adminProviderQuery.data ?? null;
   const adminPaymentSettings = adminPaymentSettingsQuery.data ?? null;
@@ -467,6 +574,8 @@ export default function App() {
       ? `${window.location.origin}/?ref=${encodeURIComponent(user.referralCode)}`
       : null);
   const isAdminSaving = updateAdminProviderMutation.isPending || updateAdminPaymentMutation.isPending;
+  const activeWorkspaceMembership = workspaceMemberships.find((membership) => membership.status === 'active') ?? null;
+  const canManageWorkspaceMembers = activeWorkspaceMembership?.role === 'owner';
 
   const activeWeeklySummary = weeklySummary ?? defaultWeeklySummary;
   const activeMonthlySummary = monthlySummary ?? {
@@ -1039,15 +1148,52 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const savedUser = window.localStorage.getItem('akontaai-user');
-    if (savedUser) {
+    let cancelled = false;
+    const restoreSession = async () => {
+      const savedUser = window.localStorage.getItem('akontaai-user');
+      const storedSession = getStoredAuthSession();
+
+      if (storedSession) {
+        setAuthSession(storedSession);
+      }
+
+      if (!savedUser) return;
+
       try {
-        setUser(JSON.parse(savedUser));
-        setView('chat');
+        const parsedUser = JSON.parse(savedUser) as User;
+        if (storedSession) {
+          const refreshed = await refreshAuthSession();
+          if (!refreshed) {
+            clearStoredAuthSession();
+            if (!cancelled) {
+              setAuthSession(null);
+            }
+            return;
+          }
+
+          if (!cancelled) {
+            setAuthSession(getStoredAuthSession());
+            setUser(parsedUser);
+            setView('chat');
+          }
+          return;
+        }
+
+        // Legacy fallback for dev mode while OTP auth is rolling out.
+        if (!cancelled) {
+          setLegacyUserContext(parsedUser.id);
+          setUser(parsedUser);
+          setView('chat');
+        }
       } catch (error) {
         console.error('Failed to restore user from storage', error);
       }
-    }
+    };
+
+    void restoreSession();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -1057,6 +1203,37 @@ export default function App() {
       window.localStorage.removeItem('akontaai-user');
     }
   }, [user]);
+
+  useEffect(() => {
+    if (!authSession) {
+      setLegacyUserContext(user?.id ?? null);
+    }
+  }, [authSession, user?.id]);
+
+  useEffect(() => {
+    if (!workspaceMembers.length) return;
+    setTeamRoleDrafts((previous) => {
+      const next = { ...previous };
+      workspaceMembers.forEach((member) => {
+        if (!next[member.membershipId]) {
+          next[member.membershipId] = member.role;
+        }
+      });
+      return next;
+    });
+  }, [workspaceMembers]);
+
+  useEffect(() => {
+    if (workspaceMemberships.length === 0) return;
+    const active = workspaceMemberships.find((membership) => membership.status === 'active');
+    if (active) {
+      setWorkspaceSelectionId(active.businessId);
+      return;
+    }
+    if (!workspaceSelectionId) {
+      setWorkspaceSelectionId(workspaceMemberships[0].businessId);
+    }
+  }, [workspaceMemberships, workspaceSelectionId]);
 
   useEffect(() => {
     if (!user) {
@@ -1352,8 +1529,204 @@ export default function App() {
     }
   }, [hasReportAccess]);
 
+  const handleRequestOtp = async () => {
+    const normalizedPhone = authPhoneNumber.trim();
+    if (!normalizedPhone) {
+      setError('Enter the phone number linked to your workspace account.');
+      return;
+    }
+
+    setError(null);
+    setAuthNotice(null);
+    setAuthDevOtpCode(null);
+
+    try {
+      const response = await requestOtpMutation.mutateAsync(normalizedPhone);
+      setAuthStep('verify');
+      setAuthOtpCode('');
+      setAuthOtpExpiresAt(response.expiresAt);
+      setAuthDevOtpCode(response.devOtpCode ?? null);
+      setAuthNotice('OTP requested. Enter the 6-digit code to continue.');
+    } catch (requestError) {
+      console.error('Unable to request OTP', requestError);
+      const message = requestError instanceof Error ? requestError.message : 'Unable to request OTP right now.';
+      setError(message);
+    }
+  };
+
+  const handleVerifyOtp = async () => {
+    const normalizedPhone = authPhoneNumber.trim();
+    const normalizedOtp = authOtpCode.trim();
+    if (!normalizedPhone || !normalizedOtp) {
+      setError('Both phone number and OTP code are required.');
+      return;
+    }
+
+    setError(null);
+    setAuthNotice(null);
+    try {
+      const response = await verifyOtpMutation.mutateAsync({
+        phoneNumber: normalizedPhone,
+        code: normalizedOtp
+      });
+      setUser(response.user);
+      setAuthSession(getStoredAuthSession());
+      setWorkspaceSelectionId(response.session.businessId);
+      setAuthOtpCode('');
+      setAuthDevOtpCode(null);
+      setView('chat');
+    } catch (verifyError) {
+      console.error('Unable to verify OTP', verifyError);
+      const message = verifyError instanceof Error ? verifyError.message : 'OTP verification failed.';
+      setError(message);
+    }
+  };
+
+  const handleLogout = async () => {
+    setError(null);
+    setSettingsNotice(null);
+    setTeamNotice(null);
+    try {
+      await logoutMutation.mutateAsync();
+    } catch (logoutError) {
+      console.error('Unable to logout session cleanly', logoutError);
+    } finally {
+      clearStoredAuthSession();
+      setAuthSession(null);
+      setLegacyUserContext(null);
+      setUser(null);
+      setMessages(chatMessages);
+      setView('landing');
+    }
+  };
+
+  const handleWorkspaceSwitch = async () => {
+    if (!workspaceSelectionId) {
+      setError('Select a workspace first.');
+      return;
+    }
+
+    setError(null);
+    setSettingsNotice(null);
+    setTeamNotice(null);
+
+    try {
+      await selectWorkspaceMutation.mutateAsync(workspaceSelectionId);
+      setAuthSession(getStoredAuthSession());
+      const refreshedMemberships = await workspaceMembershipsQuery.refetch();
+      const selected = refreshedMemberships.data?.find((entry) => entry.businessId === workspaceSelectionId);
+      if (selected) {
+        setTeamNotice(`Switched to ${selected.businessName}.`);
+      } else {
+        setTeamNotice('Workspace switched.');
+      }
+    } catch (switchError) {
+      console.error('Unable to switch workspace', switchError);
+      const message = switchError instanceof Error ? switchError.message : 'Unable to switch workspace.';
+      setError(message);
+    }
+  };
+
   if (view === 'landing') {
     return <LandingView setView={setView} heroSlide={heroSlide} setHeroSlide={setHeroSlide} appCopyrightNotice={appCopyrightNotice} />;
+  }
+
+  if (view === 'auth') {
+    const otpExpiresLabel = authOtpExpiresAt
+      ? new Date(authOtpExpiresAt).toLocaleTimeString('en-GH', { hour: '2-digit', minute: '2-digit' })
+      : null;
+
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-green-50 via-white to-emerald-50 px-4 py-8">
+        <div className="mx-auto max-w-md">
+          <button
+            onClick={() => setView('landing')}
+            className="mb-6 inline-flex items-center rounded-full border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+          >
+            <ArrowLeftIcon size={16} className="mr-1 text-gray-500" />
+            Back
+          </button>
+
+          <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+            <h1 className="text-2xl font-bold text-gray-900">Sign in to your workspace</h1>
+            <p className="mt-2 text-sm text-gray-500">
+              Use your team phone number. We will verify with OTP and open your workspace role.
+            </p>
+
+            <div className="mt-5 space-y-3">
+              <label className="block">
+                <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-gray-500">Phone number</span>
+                <input
+                  value={authPhoneNumber}
+                  onChange={(event) => setAuthPhoneNumber(event.target.value)}
+                  placeholder="233240000001"
+                  className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-800 focus:border-green-500 focus:outline-none"
+                />
+              </label>
+
+              {authStep === 'verify' && (
+                <label className="block">
+                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-gray-500">OTP code</span>
+                  <input
+                    value={authOtpCode}
+                    onChange={(event) => setAuthOtpCode(event.target.value.replace(/\D+/g, '').slice(0, 6))}
+                    placeholder="6-digit code"
+                    className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-800 focus:border-green-500 focus:outline-none"
+                  />
+                </label>
+              )}
+
+              {otpExpiresLabel && authStep === 'verify' && (
+                <p className="text-xs text-gray-500">OTP expires at {otpExpiresLabel}.</p>
+              )}
+
+              {authDevOtpCode && (
+                <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                  Dev OTP code: <span className="font-semibold">{authDevOtpCode}</span>
+                </p>
+              )}
+              {authNotice && (
+                <p className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-700">{authNotice}</p>
+              )}
+              {error && (
+                <p className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>
+              )}
+
+              {authStep === 'request' ? (
+                <button
+                  onClick={handleRequestOtp}
+                  disabled={isRequestingOtp}
+                  className="w-full rounded-2xl bg-green-600 px-4 py-3 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-60"
+                >
+                  {isRequestingOtp ? 'Requesting OTP...' : 'Request OTP'}
+                </button>
+              ) : (
+                <div className="space-y-2">
+                  <button
+                    onClick={handleVerifyOtp}
+                    disabled={isVerifyingOtp}
+                    className="w-full rounded-2xl bg-green-600 px-4 py-3 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-60"
+                  >
+                    {isVerifyingOtp ? 'Verifying...' : 'Verify & Sign In'}
+                  </button>
+                  <button
+                    onClick={handleRequestOtp}
+                    disabled={isRequestingOtp}
+                    className="w-full rounded-2xl border border-gray-300 bg-white px-4 py-3 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+                  >
+                    {isRequestingOtp ? 'Sending...' : 'Resend OTP'}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-4 rounded-2xl border border-gray-200 bg-white px-4 py-4 text-sm text-gray-600">
+            New business owner? <button onClick={() => setView('onboarding')} className="font-semibold text-green-700 hover:text-green-800">Create account</button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   // Onboarding Flow
@@ -1414,14 +1787,19 @@ export default function App() {
           subscriptionStatus: 'trial'
         });
 
-        setUser(savedUser);
+        setUser(null);
+        setAuthPhoneNumber(savedUser.phoneNumber);
+        setAuthOtpCode('');
+        setAuthStep('request');
+        setAuthNotice('Account created. Request OTP to sign in as workspace owner.');
+        setError(null);
         if (onboardingReferralCode) {
           const nextUrl = new URL(window.location.href);
           nextUrl.searchParams.delete('ref');
           window.history.replaceState({}, '', nextUrl.toString());
           setOnboardingReferralCode(null);
         }
-        setView('chat');
+        setView('auth');
       } catch (err) {
         console.error(err);
         const message = err instanceof Error ? err.message : 'Failed to create your account. Please try again.';
@@ -3053,6 +3431,15 @@ export default function App() {
   if (view === 'settings') {
     const currentYear = new Date().getUTCFullYear();
     const currentMonth = new Date().getUTCMonth() + 1;
+    const inviteRoles: WorkspaceRole[] = ['cashier', 'manager', 'bookkeeper', 'viewer', 'accountant'];
+    const roleLabel: Record<WorkspaceRole, string> = {
+      owner: 'Owner',
+      cashier: 'Cashier',
+      manager: 'Manager',
+      bookkeeper: 'Bookkeeper',
+      viewer: 'Viewer',
+      accountant: 'Accountant'
+    };
 
     const handleSaveBudget = async () => {
       if (!user || !budgetAmount) return;
@@ -3087,6 +3474,7 @@ export default function App() {
       if (!user) return;
       setError(null);
       setSettingsNotice(null);
+      setTeamNotice(null);
       try {
         const updated = await updateUserMutation.mutateAsync({
           id: user.id,
@@ -3104,6 +3492,7 @@ export default function App() {
       if (!user) return;
       setError(null);
       setSettingsNotice(null);
+      setTeamNotice(null);
       try {
         const callbackUrl = `${window.location.origin}${window.location.pathname}`;
         const initialized = await initializeSubscriptionMutation.mutateAsync({
@@ -3122,6 +3511,7 @@ export default function App() {
       if (!user) return;
       setError(null);
       setSettingsNotice(null);
+      setTeamNotice(null);
       try {
         const updated = await activateSubscriptionMutation.mutateAsync({
           userId: user.id,
@@ -3141,14 +3531,97 @@ export default function App() {
       }
     };
 
+    const handleInviteWorkspaceMember = async () => {
+      if (!canManageWorkspaceMembers) return;
+      const normalizedName = teamInviteName.trim();
+      const normalizedPhone = teamInvitePhone.trim();
+      const normalizedEmail = teamInviteEmail.trim();
+
+      if (!normalizedName || (!normalizedPhone && !normalizedEmail)) {
+        setError('Team invite requires full name and either phone number or email.');
+        return;
+      }
+
+      setError(null);
+      setSettingsNotice(null);
+      setTeamNotice(null);
+
+      try {
+        await inviteWorkspaceMemberMutation.mutateAsync({
+          fullName: normalizedName,
+          phoneNumber: normalizedPhone || undefined,
+          email: normalizedEmail || undefined,
+          role: teamInviteRole
+        });
+        setTeamInviteName('');
+        setTeamInvitePhone('');
+        setTeamInviteEmail('');
+        setTeamInviteRole('cashier');
+        setTeamNotice(`${normalizedName} invited as ${roleLabel[teamInviteRole]}.`);
+      } catch (inviteError) {
+        console.error('Unable to invite workspace member', inviteError);
+        setError('Unable to invite this team member right now.');
+      }
+    };
+
+    const handleWorkspaceRoleSave = async (member: WorkspaceMember) => {
+      if (!canManageWorkspaceMembers || member.role === 'owner') return;
+      const nextRole = teamRoleDrafts[member.membershipId];
+      if (!nextRole || nextRole === member.role) return;
+
+      setError(null);
+      setSettingsNotice(null);
+      setTeamNotice(null);
+
+      try {
+        await updateWorkspaceMemberMutation.mutateAsync({
+          membershipId: member.membershipId,
+          updates: { role: nextRole }
+        });
+        setTeamNotice(`Updated ${member.user.fullName ?? member.user.name} to ${roleLabel[nextRole]}.`);
+      } catch (roleError) {
+        console.error('Unable to update member role', roleError);
+        setError('Unable to update member role right now.');
+      }
+    };
+
+    const handleWorkspaceStatusToggle = async (member: WorkspaceMember) => {
+      if (!canManageWorkspaceMembers || member.role === 'owner') return;
+
+      const nextStatus: WorkspaceMembershipStatus = member.status === 'active' ? 'inactive' : 'active';
+      setError(null);
+      setSettingsNotice(null);
+      setTeamNotice(null);
+
+      try {
+        await updateWorkspaceMemberMutation.mutateAsync({
+          membershipId: member.membershipId,
+          updates: { status: nextStatus }
+        });
+        setTeamNotice(
+          `${member.user.fullName ?? member.user.name} is now ${nextStatus === 'active' ? 'active' : 'inactive'}.`
+        );
+      } catch (statusError) {
+        console.error('Unable to update member status', statusError);
+        setError('Unable to update member status right now.');
+      }
+    };
+
     return (
       <div className="min-h-screen bg-gray-50 pb-20">
         <div className="bg-white px-4 py-6 border-b border-gray-100">
           <div className="flex items-center justify-between gap-3">
             <div>
               <h1 className="text-2xl font-bold text-gray-900">Settings</h1>
-              <p className="text-gray-500 text-sm">Preferences, referral rewards, and budget targets</p>
+              <p className="text-gray-500 text-sm">Workspace, preferences, referral rewards, and budget targets</p>
             </div>
+            <button
+              onClick={handleLogout}
+              disabled={isLoggingOut}
+              className="rounded-full border border-gray-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+            >
+              {isLoggingOut ? 'Signing out...' : 'Sign Out'}
+            </button>
           </div>
         </div>
 
@@ -3158,6 +3631,171 @@ export default function App() {
               {settingsNotice}
             </div>
           )}
+          {teamNotice && (
+            <div className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700">
+              {teamNotice}
+            </div>
+          )}
+
+          <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">Team Workspace</h2>
+                <p className="text-sm text-gray-500">Invite teammates and manage who can access this business workspace.</p>
+              </div>
+              <button
+                onClick={() => {
+                  void workspaceMembersQuery.refetch();
+                  void workspaceMembershipsQuery.refetch();
+                }}
+                className="rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+              >
+                Refresh
+              </button>
+            </div>
+
+            <div className="mb-4 rounded-2xl bg-gray-50 px-4 py-3 text-xs text-gray-600">
+              <span className="font-semibold text-gray-800">Current role: </span>
+              {activeWorkspaceMembership ? roleLabel[activeWorkspaceMembership.role] : 'Unknown'}
+              {' · '}
+              <span className="font-semibold text-gray-800">Workspace: </span>
+              {activeWorkspaceMembership?.businessName ?? 'Not available'}
+            </div>
+
+            {workspaceMemberships.length > 1 && (
+              <div className="mb-5 grid gap-2 rounded-2xl border border-gray-200 p-4 sm:grid-cols-[1fr_auto] sm:items-end">
+                <label className="block">
+                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-gray-500">Switch workspace</span>
+                  <select
+                    value={workspaceSelectionId}
+                    onChange={(event) => setWorkspaceSelectionId(event.target.value)}
+                    className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm"
+                  >
+                    {workspaceMemberships.map((membership) => (
+                      <option key={membership.membershipId} value={membership.businessId}>
+                        {membership.businessName} ({roleLabel[membership.role]})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  onClick={handleWorkspaceSwitch}
+                  disabled={
+                    isSwitchingWorkspace
+                    || !workspaceSelectionId
+                    || workspaceSelectionId === activeWorkspaceMembership?.businessId
+                  }
+                  className="rounded-2xl border border-gray-300 bg-white px-4 py-3 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {isSwitchingWorkspace ? 'Switching...' : 'Switch Workspace'}
+                </button>
+              </div>
+            )}
+
+            {canManageWorkspaceMembers ? (
+              <div className="mb-5 grid gap-3 rounded-2xl border border-gray-200 p-4 sm:grid-cols-2">
+                <input
+                  value={teamInviteName}
+                  onChange={(event) => setTeamInviteName(event.target.value)}
+                  placeholder="Full name"
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                />
+                <select
+                  value={teamInviteRole}
+                  onChange={(event) => setTeamInviteRole(event.target.value as WorkspaceRole)}
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                >
+                  {inviteRoles.map((role) => (
+                    <option key={role} value={role}>{roleLabel[role]}</option>
+                  ))}
+                </select>
+                <input
+                  value={teamInvitePhone}
+                  onChange={(event) => setTeamInvitePhone(event.target.value)}
+                  placeholder="Phone number (recommended)"
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                />
+                <input
+                  value={teamInviteEmail}
+                  onChange={(event) => setTeamInviteEmail(event.target.value)}
+                  placeholder="Email (optional)"
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                />
+                <button
+                  onClick={handleInviteWorkspaceMember}
+                  disabled={inviteWorkspaceMemberMutation.isPending}
+                  className="sm:col-span-2 inline-flex items-center justify-center rounded-2xl bg-green-500 px-5 py-3 text-sm font-semibold text-white hover:bg-green-600 disabled:opacity-50"
+                >
+                  {inviteWorkspaceMemberMutation.isPending ? 'Sending invite...' : 'Invite Team Member'}
+                </button>
+              </div>
+            ) : (
+              <p className="mb-5 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+                Only workspace owners can invite or edit team members.
+              </p>
+            )}
+
+            {workspaceMembersQuery.isLoading ? (
+              <p className="text-sm text-gray-500">Loading team members...</p>
+            ) : workspaceMembersQuery.isError ? (
+              <p className="text-sm text-red-600">Unable to load workspace members.</p>
+            ) : workspaceMembers.length === 0 ? (
+              <p className="text-sm text-gray-500">No team members yet.</p>
+            ) : (
+              <div className="space-y-3">
+                {workspaceMembers.map((member) => {
+                  const roleDraft = teamRoleDrafts[member.membershipId] ?? member.role;
+                  const canEditMember = canManageWorkspaceMembers && member.role !== 'owner';
+                  const displayName = member.user.fullName || member.user.name;
+                  return (
+                    <div key={member.membershipId} className="rounded-2xl border border-gray-200 bg-gray-50 p-4">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-semibold text-gray-900">{displayName}</p>
+                          <p className="text-xs text-gray-500">{member.user.phoneNumber}</p>
+                          {member.user.email && <p className="text-xs text-gray-500">{member.user.email}</p>}
+                        </div>
+                        <div className="text-right">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-gray-600">{roleLabel[member.role]}</p>
+                          <p className="text-xs text-gray-500">Status: {member.status}</p>
+                        </div>
+                      </div>
+                      {canEditMember && (
+                        <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                          <select
+                            value={roleDraft}
+                            onChange={(event) => {
+                              const nextRole = event.target.value as WorkspaceRole;
+                              setTeamRoleDrafts((previous) => ({ ...previous, [member.membershipId]: nextRole }));
+                            }}
+                            className="w-full rounded-xl border-gray-200 bg-white px-3 py-2 text-xs"
+                          >
+                            {inviteRoles.map((role) => (
+                              <option key={role} value={role}>{roleLabel[role]}</option>
+                            ))}
+                          </select>
+                          <button
+                            onClick={() => handleWorkspaceRoleSave(member)}
+                            disabled={updateWorkspaceMemberMutation.isPending || roleDraft === member.role}
+                            className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+                          >
+                            Save Role
+                          </button>
+                          <button
+                            onClick={() => handleWorkspaceStatusToggle(member)}
+                            disabled={updateWorkspaceMemberMutation.isPending}
+                            className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+                          >
+                            {member.status === 'active' ? 'Deactivate' : 'Activate'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
 
           <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Currency preference</h2>

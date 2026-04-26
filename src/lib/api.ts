@@ -2,6 +2,9 @@ import type {
   AdminAnalytics,
   AdminPaymentSettings,
   AdminWhatsAppSettings,
+  AuthOtpRequestResponse,
+  AuthSession,
+  AuthVerifyResponse,
   Transaction,
   User,
   SummaryPayload,
@@ -12,7 +15,11 @@ import type {
   BudgetStatus,
   BudgetTargetType,
   MonthlyInsights,
-  ReferralProgress
+  ReferralProgress,
+  WorkspaceMember,
+  WorkspaceMembership,
+  WorkspaceMembershipStatus,
+  WorkspaceRole
 } from '../types';
 import {
   mockCreateUser,
@@ -69,6 +76,92 @@ const adminHeaders: Record<string, string> = ADMIN_API_KEY
 
 let demoModeEnabled = false;
 let demoModeCallback: (() => void) | null = null;
+const LEGACY_USER_ID_KEY = 'akonta_user_id';
+const AUTH_SESSION_KEY = 'akonta_auth_session';
+const fallbackWorkspaceId = 'demo-workspace';
+const fallbackWorkspaceName = 'Demo Workspace';
+const fallbackWorkspaceMembers: WorkspaceMember[] = [];
+let refreshInFlight: Promise<boolean> | null = null;
+
+const readLegacyUserId = (): string | null => {
+  try {
+    if (typeof window === 'undefined') return null;
+    const value = window.localStorage.getItem(LEGACY_USER_ID_KEY);
+    if (!value) return null;
+    return value.trim() || null;
+  } catch {
+    return null;
+  }
+};
+
+const persistLegacyUserId = (userId: string) => {
+  try {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(LEGACY_USER_ID_KEY, userId);
+  } catch {
+    // best-effort only
+  }
+};
+
+export const setLegacyUserContext = (userId: string | null) => {
+  if (!userId) {
+    try {
+      if (typeof window === 'undefined') return;
+      window.localStorage.removeItem(LEGACY_USER_ID_KEY);
+    } catch {
+      // best-effort only
+    }
+    return;
+  }
+  persistLegacyUserId(userId);
+};
+
+const readAuthSession = (): AuthSession | null => {
+  try {
+    if (typeof window === 'undefined') return null;
+    const raw = window.localStorage.getItem(AUTH_SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<AuthSession>;
+    if (!parsed?.accessToken || !parsed?.refreshToken || !parsed?.userId || !parsed?.businessId || !parsed?.role) {
+      return null;
+    }
+    return {
+      userId: parsed.userId,
+      businessId: parsed.businessId,
+      role: parsed.role,
+      membershipId: parsed.membershipId,
+      accessToken: parsed.accessToken,
+      refreshToken: parsed.refreshToken,
+      accessExpiresIn: Number(parsed.accessExpiresIn ?? 0),
+      refreshExpiresIn: Number(parsed.refreshExpiresIn ?? 0)
+    };
+  } catch {
+    return null;
+  }
+};
+
+const persistAuthSession = (session: AuthSession | null) => {
+  try {
+    if (typeof window === 'undefined') return;
+    if (!session) {
+      window.localStorage.removeItem(AUTH_SESSION_KEY);
+      return;
+    }
+    window.localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(session));
+  } catch {
+    // best-effort only
+  }
+};
+
+export const getStoredAuthSession = (): AuthSession | null => readAuthSession();
+
+export const setStoredAuthSession = (session: AuthSession | null) => {
+  persistAuthSession(session);
+};
+
+export const clearStoredAuthSession = () => {
+  persistAuthSession(null);
+};
 
 export class OfflineSyncError extends Error {
   constructor(message = 'Network unavailable') {
@@ -90,20 +183,107 @@ export const registerDemoModeListener = (callback: () => void) => {
   demoModeCallback = callback;
 };
 
-const fetchJson = async <T>(path: string, init?: RequestInit): Promise<T> => {
-  try {
-    const mergedHeaders = new Headers(init?.headers ?? {});
-    for (const [key, value] of Object.entries(authHeaders)) {
-      if (!mergedHeaders.has(key)) {
-        mergedHeaders.set(key, value);
-      }
+const withStandardHeaders = (headers?: HeadersInit): Headers => {
+  const mergedHeaders = new Headers(headers ?? {});
+  for (const [key, value] of Object.entries(authHeaders)) {
+    if (!mergedHeaders.has(key)) {
+      mergedHeaders.set(key, value);
     }
+  }
 
+  const authSession = readAuthSession();
+  if (authSession?.accessToken && !mergedHeaders.has('authorization')) {
+    mergedHeaders.set('authorization', `Bearer ${authSession.accessToken}`);
+  }
+
+  if (!authSession?.accessToken) {
+    const legacyUserId = readLegacyUserId();
+    if (legacyUserId && !mergedHeaders.has('x-akonta-user-id')) {
+      mergedHeaders.set('x-akonta-user-id', legacyUserId);
+    }
+  }
+
+  return mergedHeaders;
+};
+
+const refreshAuthTokens = async (): Promise<boolean> => {
+  const currentSession = readAuthSession();
+  if (!currentSession?.refreshToken) return false;
+
+  if (refreshInFlight) {
+    return refreshInFlight;
+  }
+
+  refreshInFlight = (async () => {
+    try {
+      const headers = withStandardHeaders({ 'Content-Type': 'application/json' });
+      const response = await fetch(`${BASE_URL}/api/auth/refresh`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ refreshToken: currentSession.refreshToken })
+      });
+
+      if (!response.ok) {
+        clearStoredAuthSession();
+        return false;
+      }
+
+      const payload = await response.json() as {
+        tokens: {
+          accessToken: string;
+          refreshToken: string;
+          accessExpiresIn: number;
+          refreshExpiresIn: number;
+        };
+        session?: {
+          businessId?: string;
+          role?: WorkspaceRole;
+        };
+      };
+
+      const updatedSession: AuthSession = {
+        ...currentSession,
+        businessId: payload.session?.businessId ?? currentSession.businessId,
+        role: payload.session?.role ?? currentSession.role,
+        accessToken: payload.tokens.accessToken,
+        refreshToken: payload.tokens.refreshToken,
+        accessExpiresIn: payload.tokens.accessExpiresIn,
+        refreshExpiresIn: payload.tokens.refreshExpiresIn
+      };
+
+      persistAuthSession(updatedSession);
+      return true;
+    } catch {
+      clearStoredAuthSession();
+      return false;
+    } finally {
+      refreshInFlight = null;
+    }
+  })();
+
+  return refreshInFlight;
+};
+
+const fetchJson = async <T>(path: string, init?: RequestInit, options?: { skipRefresh?: boolean }): Promise<T> => {
+  try {
+    const mergedHeaders = withStandardHeaders(init?.headers);
     const response = await fetch(`${BASE_URL}${path}`, {
       ...init,
       headers: mergedHeaders
     });
     if (!response.ok) {
+      if (
+        response.status === 401
+        && !options?.skipRefresh
+        && !path.startsWith('/api/auth/')
+        && Boolean(readAuthSession()?.refreshToken)
+      ) {
+        const refreshed = await refreshAuthTokens();
+        if (refreshed) {
+          return fetchJson<T>(path, init, { skipRefresh: true });
+        }
+      }
+
       const text = await response.text();
       const isHtml = response.headers.get('content-type')?.includes('text/html');
       if ((BASE_URL === '' || response.status === 404 || isHtml) && ALLOW_MOCK_FALLBACK) {
@@ -151,6 +331,80 @@ const fallbackApi = async (path: string, init?: RequestInit) => {
 
   if (path === '/api/users' && method === 'POST') {
     return mockCreateUser(body);
+  }
+
+  if (path === '/api/workspaces' && method === 'GET') {
+    return [{
+      membershipId: 'demo-membership-owner',
+      businessId: fallbackWorkspaceId,
+      businessName: fallbackWorkspaceName,
+      role: 'owner',
+      status: 'active'
+    }] as WorkspaceMembership[];
+  }
+
+  if (path === '/api/workspaces/members' && method === 'GET') {
+    return fallbackWorkspaceMembers;
+  }
+
+  if (path === '/api/workspaces/select' && method === 'POST') {
+    return {
+      businessId: body.businessId ?? fallbackWorkspaceId,
+      role: 'owner' as WorkspaceRole,
+      tokens: {
+        accessToken: 'demo-access-token',
+        refreshToken: 'demo-refresh-token',
+        accessExpiresIn: 900,
+        refreshExpiresIn: 2592000
+      }
+    };
+  }
+
+  if (path === '/api/workspaces/members/invite' && method === 'POST') {
+    const entry: WorkspaceMember = {
+      membershipId: `demo-member-${Date.now()}`,
+      userId: `demo-user-${Date.now()}`,
+      role: (body.role ?? 'cashier') as WorkspaceRole,
+      status: 'invited',
+      joinedAt: null,
+      invitedByUserId: readLegacyUserId(),
+      user: {
+        id: `demo-user-${Date.now()}`,
+        name: body.fullName ?? 'Invited member',
+        fullName: body.fullName ?? 'Invited member',
+        phoneNumber: body.phoneNumber ?? '0000000000',
+        email: body.email ?? null,
+        status: 'pending'
+      }
+    };
+    fallbackWorkspaceMembers.push(entry);
+    return {
+      membershipId: entry.membershipId,
+      userId: entry.userId,
+      role: entry.role,
+      status: entry.status
+    };
+  }
+
+  if (path.match(/^\/api\/workspaces\/members\/[^/]+$/) && method === 'PATCH') {
+    const membershipId = path.split('/').pop() as string;
+    const index = fallbackWorkspaceMembers.findIndex((member) => member.membershipId === membershipId);
+    if (index === -1) {
+      throw new Error('Member not found.');
+    }
+    const current = fallbackWorkspaceMembers[index];
+    const updated: WorkspaceMember = {
+      ...current,
+      role: (body.role ?? current.role) as WorkspaceRole,
+      status: (body.status ?? current.status) as WorkspaceMembershipStatus
+    };
+    fallbackWorkspaceMembers[index] = updated;
+    return {
+      membershipId: updated.membershipId,
+      role: updated.role,
+      status: updated.status,
+      joinedAt: updated.joinedAt
+    };
   }
 
   if (path.match(/^\/api\/users\/[^/]+\/referrals$/) && method === 'GET') {
@@ -291,25 +545,180 @@ const fallbackApi = async (path: string, init?: RequestInit) => {
 };
 
 export const createUser = async (user: Partial<User>): Promise<User> => {
-  return fetchJson<User>('/api/users', {
+  const created = await fetchJson<User>('/api/users', {
     method: 'POST',
     headers: jsonHeaders,
     body: JSON.stringify(user)
   });
+  persistLegacyUserId(created.id);
+  return created;
+};
+
+export const requestOtp = async (phoneNumber: string): Promise<AuthOtpRequestResponse> => {
+  return fetchJson<AuthOtpRequestResponse>('/api/auth/request-otp', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ phoneNumber })
+  });
+};
+
+export const verifyOtp = async (payload: {
+  phoneNumber: string;
+  code: string;
+  businessId?: string;
+}): Promise<AuthVerifyResponse> => {
+  const result = await fetchJson<AuthVerifyResponse>('/api/auth/verify-otp', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
+  });
+
+  persistAuthSession({
+    userId: result.user.id,
+    businessId: result.session.businessId,
+    role: result.session.role,
+    accessToken: result.tokens.accessToken,
+    refreshToken: result.tokens.refreshToken,
+    accessExpiresIn: result.tokens.accessExpiresIn,
+    refreshExpiresIn: result.tokens.refreshExpiresIn
+  });
+  persistLegacyUserId(result.user.id);
+  return result;
+};
+
+export const logoutSession = async (): Promise<void> => {
+  const session = readAuthSession();
+  if (session?.refreshToken) {
+    try {
+      await fetchJson<{ success: boolean }>(
+        '/api/auth/logout',
+        {
+          method: 'POST',
+          headers: jsonHeaders,
+          body: JSON.stringify({ refreshToken: session.refreshToken })
+        },
+        { skipRefresh: true }
+      );
+    } catch {
+      // Best-effort only
+    }
+  }
+  clearStoredAuthSession();
+};
+
+export const refreshAuthSession = async (): Promise<boolean> => {
+  return refreshAuthTokens();
 };
 
 export const getUser = async (id: string): Promise<User> => {
-  return fetchJson<User>(`/api/users/${id}`);
+  const user = await fetchJson<User>(`/api/users/${id}`);
+  setLegacyUserContext(user.id);
+  return user;
 };
 
 export const updateUser = async (
   id: string,
   updates: Partial<Pick<User, 'name' | 'businessName' | 'businessType' | 'preferredTime' | 'timezone' | 'currencyCode'>>
 ): Promise<User> => {
-  return fetchJson<User>(`/api/users/${encodeURIComponent(id)}`, {
+  const user = await fetchJson<User>(`/api/users/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: jsonHeaders,
     body: JSON.stringify(updates)
+  });
+  setLegacyUserContext(user.id);
+  return user;
+};
+
+export const getWorkspaces = async (): Promise<WorkspaceMembership[]> => {
+  return fetchJson<WorkspaceMembership[]>('/api/workspaces');
+};
+
+export const selectWorkspace = async (businessId: string): Promise<{
+  businessId: string;
+  role: WorkspaceRole;
+  tokens: {
+    accessToken: string;
+    refreshToken: string;
+    accessExpiresIn: number;
+    refreshExpiresIn: number;
+  };
+}> => {
+  const result = await fetchJson<{
+    businessId: string;
+    role: WorkspaceRole;
+    tokens: {
+      accessToken: string;
+      refreshToken: string;
+      accessExpiresIn: number;
+      refreshExpiresIn: number;
+    };
+  }>('/api/workspaces/select', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ businessId })
+  });
+
+  const session = readAuthSession();
+  if (session) {
+    persistAuthSession({
+      ...session,
+      businessId: result.businessId,
+      role: result.role,
+      accessToken: result.tokens.accessToken,
+      refreshToken: result.tokens.refreshToken,
+      accessExpiresIn: result.tokens.accessExpiresIn,
+      refreshExpiresIn: result.tokens.refreshExpiresIn
+    });
+  }
+
+  return result;
+};
+
+export const getWorkspaceMembers = async (): Promise<WorkspaceMember[]> => {
+  return fetchJson<WorkspaceMember[]>('/api/workspaces/members');
+};
+
+export const inviteWorkspaceMember = async (payload: {
+  fullName: string;
+  phoneNumber?: string;
+  email?: string;
+  role: WorkspaceRole;
+}): Promise<{
+  membershipId: string;
+  userId: string;
+  role: WorkspaceRole;
+  status: WorkspaceMembershipStatus;
+}> => {
+  return fetchJson<{
+    membershipId: string;
+    userId: string;
+    role: WorkspaceRole;
+    status: WorkspaceMembershipStatus;
+  }>('/api/workspaces/members/invite', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
+  });
+};
+
+export const updateWorkspaceMember = async (
+  membershipId: string,
+  payload: { role?: WorkspaceRole; status?: WorkspaceMembershipStatus }
+): Promise<{
+  membershipId: string;
+  role: WorkspaceRole;
+  status: WorkspaceMembershipStatus;
+  joinedAt?: string | null;
+}> => {
+  return fetchJson<{
+    membershipId: string;
+    role: WorkspaceRole;
+    status: WorkspaceMembershipStatus;
+    joinedAt?: string | null;
+  }>(`/api/workspaces/members/${encodeURIComponent(membershipId)}`, {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
   });
 };
 

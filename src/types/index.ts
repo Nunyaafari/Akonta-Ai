@@ -257,6 +257,75 @@ export interface ReferralProgress {
   }>;
 }
 
+export type WorkspaceRole = 'owner' | 'cashier' | 'manager' | 'bookkeeper' | 'viewer' | 'accountant';
+export type WorkspaceMembershipStatus = 'invited' | 'active' | 'inactive' | 'revoked';
+
+export interface WorkspaceMembership {
+  membershipId: string;
+  businessId: string;
+  businessName: string;
+  role: WorkspaceRole;
+  status: WorkspaceMembershipStatus;
+}
+
+export interface WorkspaceMember {
+  membershipId: string;
+  userId: string;
+  role: WorkspaceRole;
+  status: WorkspaceMembershipStatus;
+  joinedAt?: string | null;
+  invitedByUserId?: string | null;
+  user: {
+    id: string;
+    name: string;
+    fullName?: string | null;
+    phoneNumber: string;
+    email?: string | null;
+    status: 'pending' | 'active' | 'inactive' | 'suspended';
+  };
+}
+
+export interface AuthTokens {
+  accessToken: string;
+  refreshToken: string;
+  accessExpiresIn: number;
+  refreshExpiresIn: number;
+}
+
+export interface AuthSession {
+  userId: string;
+  businessId: string;
+  role: WorkspaceRole;
+  membershipId?: string;
+  accessToken: string;
+  refreshToken: string;
+  accessExpiresIn: number;
+  refreshExpiresIn: number;
+}
+
+export interface AuthOtpRequestResponse {
+  success: boolean;
+  expiresAt: string;
+  devOtpCode?: string;
+}
+
+export interface AuthVerifyResponse {
+  user: User;
+  session: {
+    id: string;
+    businessId: string;
+    role: WorkspaceRole;
+  };
+  memberships: Array<{
+    id: string;
+    businessId: string;
+    businessName: string;
+    role: WorkspaceRole;
+    status: WorkspaceMembershipStatus;
+  }>;
+  tokens: AuthTokens;
+}
+
 export interface AdminAnalytics {
   users: {
     total: number;
@@ -296,4 +365,4 @@ export interface PremiumInsight {
   icon: string;
 }
 
-export type AppView = 'landing' | 'onboarding' | 'chat' | 'attach' | 'dashboard' | 'reports' | 'history' | 'settings' | 'admin';
+export type AppView = 'landing' | 'auth' | 'onboarding' | 'chat' | 'attach' | 'dashboard' | 'reports' | 'history' | 'settings' | 'admin';

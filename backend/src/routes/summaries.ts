@@ -1,18 +1,21 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { Prisma } from '@prisma/client';
 import db from '../lib/db.js';
+import { requirePermission } from '../lib/auth.js';
 import { computeSummary } from '../services/summaries.js';
 
 const summaryRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get('/weekly', async (request, reply) => {
+    const auth = await requirePermission(request, reply, 'summary:view');
+    if (!auth) return;
+
     const query = request.query as {
-      userId?: string;
       start?: string;
       end?: string;
     };
 
-    if (!query.userId || !query.start || !query.end) {
-      return reply.status(400).send({ message: 'userId, start, and end query parameters are required.' });
+    if (!query.start || !query.end) {
+      return reply.status(400).send({ message: 'start and end query parameters are required.' });
     }
 
     const periodStart = new Date(query.start);
@@ -20,9 +23,10 @@ const summaryRoutes: FastifyPluginAsync = async (fastify) => {
 
     const transactions = await db.transaction.findMany({
       where: {
-        userId: query.userId,
+        businessId: auth.businessId,
         status: 'confirmed',
         correctionOfId: null,
+        isDeleted: false,
         date: {
           gte: periodStart,
           lte: periodEnd
@@ -40,14 +44,16 @@ const summaryRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   fastify.get('/monthly', async (request, reply) => {
+    const auth = await requirePermission(request, reply, 'summary:view');
+    if (!auth) return;
+
     const query = request.query as {
-      userId?: string;
       year?: string;
       month?: string;
     };
 
-    if (!query.userId || !query.year || !query.month) {
-      return reply.status(400).send({ message: 'userId, year, and month query parameters are required.' });
+    if (!query.year || !query.month) {
+      return reply.status(400).send({ message: 'year and month query parameters are required.' });
     }
 
     const year = Number(query.year);
@@ -63,9 +69,10 @@ const summaryRoutes: FastifyPluginAsync = async (fastify) => {
 
     const transactions = await db.transaction.findMany({
       where: {
-        userId: query.userId,
+        businessId: auth.businessId,
         status: 'confirmed',
         correctionOfId: null,
+        isDeleted: false,
         date: {
           gte: periodStart,
           lte: periodEnd
@@ -83,19 +90,17 @@ const summaryRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   fastify.get('/', async (request, reply) => {
+    const auth = await requirePermission(request, reply, 'summary:view');
+    if (!auth) return;
+
     const query = request.query as {
-      userId?: string;
       periodType?: 'weekly' | 'monthly';
       year?: string;
       month?: string;
     };
 
-    if (!query.userId) {
-      return reply.status(400).send({ message: 'userId query parameter is required.' });
-    }
-
     const where: Record<string, any> = {
-      userId: query.userId
+      businessId: auth.businessId
     };
 
     if (query.periodType) {
@@ -120,12 +125,15 @@ const summaryRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   fastify.get('/:id', async (request, reply) => {
+    const auth = await requirePermission(request, reply, 'summary:view');
+    if (!auth) return;
+
     const params = request.params as { id: string };
     const summary = await db.summary.findUnique({
       where: { id: params.id }
     });
 
-    if (!summary) {
+    if (!summary || summary.businessId !== auth.businessId) {
       return reply.status(404).send({ message: 'Summary not found.' });
     }
 
@@ -133,24 +141,27 @@ const summaryRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   fastify.post('/', async (request, reply) => {
+    const auth = await requirePermission(request, reply, 'summary:view');
+    if (!auth) return;
+
     const body = request.body as {
-      userId: string;
-      periodType: 'weekly' | 'monthly';
-      periodStart: string;
-      periodEnd: string;
+      periodType?: 'weekly' | 'monthly';
+      periodStart?: string;
+      periodEnd?: string;
     };
 
-    if (!body.userId || !body.periodType || !body.periodStart || !body.periodEnd) {
-      return reply.status(400).send({ message: 'userId, periodType, periodStart, and periodEnd are required.' });
+    if (!body.periodType || !body.periodStart || !body.periodEnd) {
+      return reply.status(400).send({ message: 'periodType, periodStart, and periodEnd are required.' });
     }
 
     const periodStart = new Date(body.periodStart);
     const periodEnd = new Date(body.periodEnd);
     const transactions = await db.transaction.findMany({
       where: {
-        userId: body.userId,
+        businessId: auth.businessId,
         status: 'confirmed',
         correctionOfId: null,
+        isDeleted: false,
         date: {
           gte: periodStart,
           lte: periodEnd
@@ -161,7 +172,8 @@ const summaryRoutes: FastifyPluginAsync = async (fastify) => {
     const summary = computeSummary(transactions);
     const saved = await db.summary.create({
       data: {
-        userId: body.userId,
+        businessId: auth.businessId,
+        userId: auth.userId,
         periodType: body.periodType,
         periodStart,
         periodEnd,

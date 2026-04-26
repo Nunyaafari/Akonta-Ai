@@ -1,19 +1,17 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { BudgetTargetType } from '@prisma/client';
-import db from '../lib/db.js';
+import { requirePermission } from '../lib/auth.js';
 import { upsertBudget, getBudgetsForPeriod } from '../services/budgets.js';
 
 const budgetRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get('/', async (request, reply) => {
+    const auth = await requirePermission(request, reply, 'budget:view');
+    if (!auth) return;
+
     const query = request.query as {
-      userId?: string;
       year?: string;
       month?: string;
     };
-
-    if (!query.userId) {
-      return reply.status(400).send({ message: 'userId query parameter is required.' });
-    }
 
     if (!query.year || !query.month) {
       return reply.status(400).send({ message: 'year and month query parameters are required.' });
@@ -27,29 +25,26 @@ const budgetRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const periodStart = new Date(Date.UTC(year, month - 1, 1));
-    const budgets = await getBudgetsForPeriod(query.userId, 'monthly', periodStart);
+    const budgets = await getBudgetsForPeriod(auth.businessId, 'monthly', periodStart);
     return budgets;
   });
 
   fastify.get('/current', async (request, reply) => {
-    const query = request.query as {
-      userId?: string;
-    };
-
-    if (!query.userId) {
-      return reply.status(400).send({ message: 'userId query parameter is required.' });
-    }
+    const auth = await requirePermission(request, reply, 'budget:view');
+    if (!auth) return;
 
     const now = new Date();
     const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-    const budgets = await getBudgetsForPeriod(query.userId, 'monthly', periodStart);
+    const budgets = await getBudgetsForPeriod(auth.businessId, 'monthly', periodStart);
 
     return budgets;
   });
 
   fastify.post('/', async (request, reply) => {
+    const auth = await requirePermission(request, reply, 'budget:manage');
+    if (!auth) return;
+
     const body = request.body as {
-      userId?: string;
       year?: number;
       month?: number;
       targetType?: BudgetTargetType;
@@ -58,13 +53,14 @@ const budgetRoutes: FastifyPluginAsync = async (fastify) => {
       notes?: string;
     };
 
-    if (!body.userId || typeof body.year !== 'number' || typeof body.month !== 'number' || !body.targetType || typeof body.amount !== 'number') {
-      return reply.status(400).send({ message: 'userId, year, month, targetType, and amount are required.' });
+    if (typeof body.year !== 'number' || typeof body.month !== 'number' || !body.targetType || typeof body.amount !== 'number') {
+      return reply.status(400).send({ message: 'year, month, targetType, and amount are required.' });
     }
 
     try {
       const budget = await upsertBudget(
-        body.userId,
+        auth.businessId,
+        auth.userId,
         body.year,
         body.month,
         body.targetType,

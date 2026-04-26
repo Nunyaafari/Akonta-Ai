@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
+import { requirePermission } from '../lib/auth.js';
 import { getMonthlyInsights } from '../services/insights.js';
 
 const parseYearMonth = (yearValue?: string, monthValue?: string) => {
@@ -14,14 +15,16 @@ const parseYearMonth = (yearValue?: string, monthValue?: string) => {
 
 const insightRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get('/monthly', async (request, reply) => {
+    const auth = await requirePermission(request, reply, 'insight:view');
+    if (!auth) return;
+
     const query = request.query as {
-      userId?: string;
       year?: string;
       month?: string;
     };
 
-    if (!query.userId || !query.year || !query.month) {
-      return reply.status(400).send({ message: 'userId, year, and month query parameters are required.' });
+    if (!query.year || !query.month) {
+      return reply.status(400).send({ message: 'year and month query parameters are required.' });
     }
 
     const yearMonth = parseYearMonth(query.year, query.month);
@@ -30,24 +33,21 @@ const insightRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     return getMonthlyInsights({
-      userId: query.userId,
+      businessId: auth.businessId,
+      userId: auth.userId,
       year: yearMonth.year,
       month: yearMonth.month
     });
   });
 
   fastify.get('/current', async (request, reply) => {
-    const query = request.query as {
-      userId?: string;
-    };
-
-    if (!query.userId) {
-      return reply.status(400).send({ message: 'userId query parameter is required.' });
-    }
+    const auth = await requirePermission(request, reply, 'insight:view');
+    if (!auth) return;
 
     const now = new Date();
     return getMonthlyInsights({
-      userId: query.userId,
+      businessId: auth.businessId,
+      userId: auth.userId,
       year: now.getUTCFullYear(),
       month: now.getUTCMonth() + 1,
       now

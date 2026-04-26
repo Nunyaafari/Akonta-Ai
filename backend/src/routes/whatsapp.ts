@@ -69,28 +69,35 @@ const whatsappRoutes: FastifyPluginAsync = async (fastify) => {
     return Array.from(candidates);
   };
 
-  const findUserByPhone = async (phone: string) => {
+  const findOwnerBusinessByPhone = async (phone: string) => {
     const candidates = buildPhoneCandidates(phone);
     if (candidates.length > 0) {
-      const user = await db.user.findFirst({
+      const business = await db.business.findFirst({
         where: {
-          OR: candidates.map((candidate) => ({ phoneNumber: candidate }))
-        }
+          OR: candidates.flatMap((candidate) => ([
+            { primaryWhatsappUser: { phoneNumber: candidate } },
+            { primaryWhatsappUser: { whatsappNumber: candidate } }
+          ]))
+        },
+        include: { primaryWhatsappUser: true }
       });
-      if (user) return user;
+      if (business) return business;
     }
 
     const digits = normalizePhoneDigits(phone);
     if (digits.length >= 8) {
-      const fallbackUser = await db.user.findFirst({
+      const fallbackBusiness = await db.business.findFirst({
         where: {
           OR: [
-            { phoneNumber: { endsWith: digits } },
-            { phoneNumber: { endsWith: digits.slice(-9) } }
+            { primaryWhatsappUser: { phoneNumber: { endsWith: digits } } },
+            { primaryWhatsappUser: { phoneNumber: { endsWith: digits.slice(-9) } } },
+            { primaryWhatsappUser: { whatsappNumber: { endsWith: digits } } },
+            { primaryWhatsappUser: { whatsappNumber: { endsWith: digits.slice(-9) } } }
           ]
-        }
+        },
+        include: { primaryWhatsappUser: true }
       });
-      if (fallbackUser) return fallbackUser;
+      if (fallbackBusiness) return fallbackBusiness;
     }
 
     return null;
@@ -118,8 +125,8 @@ const whatsappRoutes: FastifyPluginAsync = async (fastify) => {
       };
     }
 
-    const user = await findUserByPhone(params.from);
-    if (!user) {
+    const business = await findOwnerBusinessByPhone(params.from);
+    if (!business) {
       await db.processedWebhookEvent.update({
         where: { id: reservation.id },
         data: { payload: params.payload as Prisma.InputJsonValue }
@@ -127,7 +134,7 @@ const whatsappRoutes: FastifyPluginAsync = async (fastify) => {
       return {
         success: true,
         skipped: true,
-        reason: 'No user account mapped to sender phone number.',
+        reason: 'No owner workspace mapped to sender phone number.',
         provider: params.provider,
         eventId: params.eventId
       };
@@ -135,7 +142,8 @@ const whatsappRoutes: FastifyPluginAsync = async (fastify) => {
 
     try {
       const result = await processConversationMessage({
-        userId: user.id,
+        userId: business.primaryWhatsappUserId,
+        businessId: business.id,
         message: params.message,
         channel: 'whatsapp'
       });
@@ -143,7 +151,8 @@ const whatsappRoutes: FastifyPluginAsync = async (fastify) => {
       await db.processedWebhookEvent.update({
         where: { id: reservation.id },
         data: {
-          userId: user.id,
+          userId: business.primaryWhatsappUserId,
+          businessId: business.id,
           payload: params.payload as Prisma.InputJsonValue
         }
       });
@@ -153,7 +162,8 @@ const whatsappRoutes: FastifyPluginAsync = async (fastify) => {
         duplicate: false,
         provider: params.provider,
         eventId: params.eventId,
-        userId: user.id,
+        userId: business.primaryWhatsappUserId,
+        businessId: business.id,
         botReply: result.botReply,
         conversation: result.conversation,
         transactions: result.transactions

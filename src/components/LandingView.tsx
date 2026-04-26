@@ -23,8 +23,8 @@ export const LandingView: React.FC<LandingViewProps> = ({ setView, heroSlide, se
             <img src="/brand/akonta.svg" alt="Akonta AI logo" className="h-10 w-auto object-contain" />
             <span className="text-xl font-bold text-gray-900">Akonta AI</span>
           </div>
-          <button onClick={() => setView('onboarding')} className="px-4 py-2 bg-green-500 text-white rounded-full font-medium hover:bg-green-600 transition-colors">
-            Get Started
+          <button onClick={() => setView('auth')} className="px-4 py-2 bg-green-500 text-white rounded-full font-medium hover:bg-green-600 transition-colors">
+            Sign In
           </button>
         </div>
       </header>
@@ -53,8 +53,11 @@ export const LandingView: React.FC<LandingViewProps> = ({ setView, heroSlide, se
             </div>
 
             <div className="flex flex-col sm:flex-row gap-4 justify-center mb-12">
-              <button onClick={() => setView('onboarding')} className="px-8 py-4 bg-green-500 text-white rounded-2xl font-semibold text-lg hover:bg-green-600 transition-all shadow-lg shadow-green-200 flex items-center justify-center gap-2">
-                <WhatsAppIcon size={20} /> Get Started
+              <button onClick={() => setView('auth')} className="px-8 py-4 bg-green-500 text-white rounded-2xl font-semibold text-lg hover:bg-green-600 transition-all shadow-lg shadow-green-200 flex items-center justify-center gap-2">
+                <WhatsAppIcon size={20} /> Sign In with OTP
+              </button>
+              <button onClick={() => setView('onboarding')} className="px-8 py-4 bg-white text-green-700 rounded-2xl font-semibold text-lg hover:bg-green-50 transition-all border border-green-200">
+                Create Account
               </button>
               <button onClick={() => setView('dashboard')} className="px-8 py-4 bg-white text-gray-700 rounded-2xl font-semibold text-lg hover:bg-gray-50 transition-all border border-gray-200">
                 View Demo

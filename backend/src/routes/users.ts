@@ -125,6 +125,7 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
         const created = await tx.user.create({
           data: {
             name: body.name,
+            fullName: body.name,
             phoneNumber: body.phoneNumber,
             businessName: body.businessName ?? null,
             businessType: body.businessType ?? null,
@@ -140,9 +141,35 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
           }
         });
 
+        const createdBusiness = await tx.business.create({
+          data: {
+            businessName: body.businessName ?? `${body.name}'s Business`,
+            ownerUserId: created.id,
+            primaryWhatsappUserId: created.id,
+            timezone: body.timezone ?? 'Africa/Accra',
+            subscriptionStatus: desiredSubscriptionStatus
+          }
+        });
+
+        await tx.businessMembership.create({
+          data: {
+            businessId: createdBusiness.id,
+            userId: created.id,
+            role: 'owner',
+            membershipStatus: 'active',
+            joinedAt: now
+          }
+        });
+
+        await tx.user.update({
+          where: { id: created.id },
+          data: { activeBusinessId: createdBusiness.id }
+        });
+
         if (desiredSubscriptionStatus === 'trial') {
           await tx.subscriptionGrant.create({
             data: {
+              businessId: createdBusiness.id,
               userId: created.id,
               source: 'trial',
               status: 'trial',
@@ -155,6 +182,7 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
         } else if (desiredSubscriptionStatus === 'premium') {
           await tx.subscriptionGrant.create({
             data: {
+              businessId: createdBusiness.id,
               userId: created.id,
               source: 'paid',
               status: 'premium',

@@ -37,6 +37,7 @@ interface ConversationContext {
 
 interface ProcessConversationParams {
   userId: string;
+  businessId?: string;
   message: string;
   channel: ConversationChannel;
 }
@@ -487,7 +488,7 @@ const classifyCategoryEventType = (category: string): ParsedTransaction['eventTy
   return 'operating_expense';
 };
 
-const detectMissedYesterday = async (userId: string): Promise<string | undefined> => {
+const detectMissedYesterday = async (userId: string, businessId?: string): Promise<string | undefined> => {
   const now = new Date();
   const todayStart = startOfUtcDate(now);
   const yesterdayStart = addUtcDays(todayStart, -1);
@@ -495,8 +496,10 @@ const detectMissedYesterday = async (userId: string): Promise<string | undefined
   const historyCountBeforeToday = await db.transaction.count({
     where: {
       userId,
+      ...(businessId ? { businessId } : {}),
       status: 'confirmed',
       correctionOfId: null,
+      isDeleted: false,
       date: { lt: todayStart }
     }
   });
@@ -506,8 +509,10 @@ const detectMissedYesterday = async (userId: string): Promise<string | undefined
   const yesterdayCount = await db.transaction.count({
     where: {
       userId,
+      ...(businessId ? { businessId } : {}),
       status: 'confirmed',
       correctionOfId: null,
+      isDeleted: false,
       date: {
         gte: yesterdayStart,
         lt: todayStart
@@ -524,6 +529,7 @@ const resolveConversationLogDate = (context: ConversationContext): Date =>
 
 const upsertDraftTransaction = async (params: {
   transactionId?: string;
+  businessId?: string;
   userId: string;
   type: 'revenue' | 'expense';
   eventType?: ParsedTransaction['eventType'];
@@ -534,7 +540,7 @@ const upsertDraftTransaction = async (params: {
 }): Promise<Transaction> => {
   if (params.transactionId) {
     const existing = await db.transaction.findUnique({ where: { id: params.transactionId } });
-    if (existing && existing.status === 'draft') {
+    if (existing && existing.status === 'draft' && (!params.businessId || existing.businessId === params.businessId)) {
       return db.transaction.update({
         where: { id: existing.id },
         data: {
@@ -551,7 +557,10 @@ const upsertDraftTransaction = async (params: {
 
   return db.transaction.create({
     data: {
+      businessId: params.businessId,
       userId: params.userId,
+      createdByUserId: params.userId,
+      sourceChannel: 'app',
       type: params.type,
       eventType: params.eventType ?? 'other',
       status: 'draft',
@@ -587,7 +596,16 @@ const buildDraftSummary = (context: ConversationContext, display: ConversationDi
   return lines.join('\n');
 };
 
-const getMonthlyData = async (userId: string) => {
+const getMonthlyData = async (userId: string, businessId?: string) => {
+  let resolvedBusinessId = businessId;
+  if (!resolvedBusinessId) {
+    const profile = await db.user.findUnique({
+      where: { id: userId },
+      select: { activeBusinessId: true }
+    });
+    resolvedBusinessId = profile?.activeBusinessId ?? undefined;
+  }
+
   const now = new Date();
   const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
   const periodEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
@@ -596,8 +614,10 @@ const getMonthlyData = async (userId: string) => {
   const monthlyTransactions = await db.transaction.findMany({
     where: {
       userId,
+      ...(resolvedBusinessId ? { businessId: resolvedBusinessId } : {}),
       status: 'confirmed',
       correctionOfId: null,
+      isDeleted: false,
       date: {
         gte: periodStart,
         lte: periodEnd
@@ -605,7 +625,7 @@ const getMonthlyData = async (userId: string) => {
     }
   });
 
-  const budgets = await getBudgetsForPeriod(userId, 'monthly', periodStart);
+  const budgets = await getBudgetsForPeriod(resolvedBusinessId, 'monthly', periodStart);
   const budgetStatuses = budgets.map((budget) => computeBudgetStatus(budget, monthlyTransactions));
 
   return {
@@ -616,12 +636,14 @@ const getMonthlyData = async (userId: string) => {
 
 const buildPostSaveAdvice = async (
   userId: string,
+  businessId: string | undefined,
   display: ConversationDisplayPreferences
 ): Promise<string | null> => {
   try {
     const now = new Date();
     const insights = await getMonthlyInsights({
       userId,
+      businessId: businessId ?? '',
       year: now.getUTCFullYear(),
       month: now.getUTCMonth() + 1,
       now
@@ -669,11 +691,12 @@ const buildPostSaveAdvice = async (
 
 const finalizeResult = async (params: {
   userId: string;
+  businessId?: string;
   botReply: string;
   step: ConversationStep;
   touchedTransactions: Transaction[];
 }) => {
-  const { monthlyTransactions, budgetStatuses } = await getMonthlyData(params.userId);
+  const { monthlyTransactions, budgetStatuses } = await getMonthlyData(params.userId, params.businessId);
   return {
     botReply: params.botReply,
     conversation: {
@@ -795,7 +818,7 @@ export const processConversationMessage = async (
       let botReply = idleReply;
 
       if (loggingIntent) {
-        const missedDateKey = context.logDateKey ? undefined : await detectMissedYesterday(params.userId);
+        const missedDateKey = context.logDateKey ? undefined : await detectMissedYesterday(params.userId, params.businessId);
         if (missedDateKey) {
           context.pendingBackfillDateKey = missedDateKey;
           step = 'ask_backfill_consent';
@@ -827,6 +850,7 @@ export const processConversationMessage = async (
       const salesEventType = explicitSalesEvent ?? context.salesEventType ?? revenue.eventType ?? 'cash_sale';
       const draftRevenue = await upsertDraftTransaction({
         transactionId: context.salesTransactionId,
+        businessId: params.businessId,
         userId: params.userId,
         type: 'revenue',
         eventType: salesEventType,
@@ -856,6 +880,7 @@ export const processConversationMessage = async (
       const expenseCategory = expense.category ?? defaultExpenseCategory(expenseEventType);
       const draftExpense = await upsertDraftTransaction({
         transactionId: context.expenseTransactionId,
+        businessId: params.businessId,
         userId: params.userId,
         type: 'expense',
         eventType: expenseEventType,
@@ -1111,6 +1136,7 @@ export const processConversationMessage = async (
         ?? defaultExpenseCategory(expenseEventType);
       const draftExpense = await upsertDraftTransaction({
         transactionId: context.expenseTransactionId,
+        businessId: params.businessId,
         userId: params.userId,
         type: 'expense',
         eventType: expenseEventType,
@@ -1182,6 +1208,7 @@ export const processConversationMessage = async (
     const salesEventType = explicitSalesEvent ?? context.salesEventType ?? 'cash_sale';
     const draftRevenue = await upsertDraftTransaction({
       transactionId: context.salesTransactionId,
+      businessId: params.businessId,
       userId: params.userId,
       type: 'revenue',
       eventType: salesEventType,
@@ -1205,7 +1232,17 @@ export const processConversationMessage = async (
     if (explicitSalesEvent) context.salesTypeConfirmed = true;
     context.pendingSalesTypeLabel = undefined;
 
-    step = context.salesTypeConfirmed ? 'ask_expense' : 'ask_sales_type';
+    if (!context.salesTypeConfirmed) {
+      step = 'ask_sales_type';
+    } else if (context.expenseAmount === undefined) {
+      step = 'ask_expense';
+    } else if ((context.expenseAmount ?? 0) > 0 && !context.expenseTypeConfirmed) {
+      step = 'ask_expense_type';
+    } else if ((context.expenseAmount ?? 0) > 0 && !context.expenseCategory) {
+      step = 'ask_expense_category';
+    } else {
+      step = 'await_confirm';
+    }
 
     await db.conversationSession.update({
       where: { id: session.id },
@@ -1216,7 +1253,16 @@ export const processConversationMessage = async (
       userId: params.userId,
       botReply: step === 'ask_sales_type'
         ? buildSalesTypePrompt(`Recorded draft inflow: ${formatCurrencyForDisplay(draftRevenue.amount, display)}.`, customInflowItems)
-        : `Recorded draft inflow: ${formatCurrencyForDisplay(draftRevenue.amount, display)}. ${buildExpenseQuestionForLogDate(display, context.logDateKey)} (Reply NO if there was no expense.)`,
+        : step === 'ask_expense'
+          ? `Recorded draft inflow: ${formatCurrencyForDisplay(draftRevenue.amount, display)}. ${buildExpenseQuestionForLogDate(display, context.logDateKey)} (Reply NO if there was no expense.)`
+          : step === 'ask_expense_type'
+            ? buildExpenseTypePrompt(
+              `Recorded draft inflow: ${formatCurrencyForDisplay(draftRevenue.amount, display)}. Existing draft expense: ${formatCurrencyForDisplay(context.expenseAmount ?? 0, display)}.`,
+              customExpenseItems
+            )
+            : step === 'ask_expense_category'
+              ? `Recorded draft inflow: ${formatCurrencyForDisplay(draftRevenue.amount, display)}. What was the expense spent on?`
+              : `Draft summary:\n${buildDraftSummary(context, display)}\n\n${buildAwaitConfirmPrompt()}`,
       step,
       touchedTransactions
     });
@@ -1420,6 +1466,7 @@ export const processConversationMessage = async (
       ?? defaultExpenseCategory(expenseEventType);
     const draftExpense = await upsertDraftTransaction({
       transactionId: context.expenseTransactionId,
+      businessId: params.businessId,
       userId: params.userId,
       type: 'expense',
       eventType: expenseEventType,
@@ -1733,7 +1780,7 @@ export const processConversationMessage = async (
         }
       });
 
-      const advice = await buildPostSaveAdvice(params.userId, display);
+      const advice = await buildPostSaveAdvice(params.userId, params.businessId, display);
       const botReply = advice
         ? `Saved. Your entries are now confirmed.\n\n${advice}\n\nSend another message when you are ready to log more.`
         : 'Saved. Your entries are now confirmed. Send another message when you are ready to log more.';

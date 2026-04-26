@@ -24,13 +24,13 @@ const normalizeMonthPeriod = (year: number, month: number) => {
 };
 
 export const getBudgetForPeriod = async (
-  userId: string,
+  businessId: string,
   periodType: PeriodType,
   periodStart: Date,
   targetType?: BudgetTargetType
 ): Promise<Budget | null> => {
   const where: Record<string, any> = {
-    userId,
+    businessId,
     periodType,
     periodStart
   };
@@ -43,16 +43,18 @@ export const getBudgetForPeriod = async (
 };
 
 export const getBudgetsForPeriod = async (
-  userId: string,
+  businessId: string | undefined,
   periodType: PeriodType,
   periodStart: Date
 ): Promise<Budget[]> => {
+  if (!businessId) return [];
   return db.budget.findMany({
-    where: { userId, periodType, periodStart }
+    where: { businessId, periodType, periodStart }
   });
 };
 
 export const upsertBudget = async (
+  businessId: string,
   userId: string,
   year: number,
   month: number,
@@ -65,7 +67,7 @@ export const upsertBudget = async (
 
   const existing = await db.budget.findFirst({
     where: {
-      userId,
+      businessId,
       periodType: 'monthly',
       periodStart: start,
       targetType,
@@ -82,6 +84,7 @@ export const upsertBudget = async (
 
   return db.budget.create({
     data: {
+      businessId,
       userId,
       periodType: 'monthly',
       periodStart: start,

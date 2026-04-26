@@ -96,7 +96,8 @@ export const initializeSubscriptionPayment = async (params: {
       id: true,
       name: true,
       phoneNumber: true,
-      currencyCode: true
+      currencyCode: true,
+      activeBusinessId: true
     }
   });
 
@@ -132,6 +133,7 @@ export const initializeSubscriptionPayment = async (params: {
       channels: ['card', 'mobile_money'],
       metadata: {
         userId: user.id,
+        businessId: user.activeBusinessId,
         months,
         userName: user.name,
         phoneNumber: user.phoneNumber,
@@ -152,6 +154,7 @@ export const initializeSubscriptionPayment = async (params: {
 
   await db.subscriptionPayment.create({
     data: {
+      businessId: user.activeBusinessId,
       userId: user.id,
       provider: 'paystack',
       reference,
@@ -235,6 +238,7 @@ export const applySuccessfulSubscriptionPayment = async (params: {
       where: { reference },
       select: {
         id: true,
+        businessId: true,
         userId: true,
         status: true,
         monthsPurchased: true,
@@ -247,6 +251,7 @@ export const applySuccessfulSubscriptionPayment = async (params: {
     });
 
     const metadataUserId = asTrimmedString(verificationData?.metadata?.userId);
+    const metadataBusinessId = asTrimmedString(verificationData?.metadata?.businessId);
     const resolvedUserId = existingPayment?.userId || metadataUserId;
     if (!resolvedUserId) {
       throw new Error('Unable to map payment to a user. Add metadata.userId in Paystack payload.');
@@ -256,7 +261,8 @@ export const applySuccessfulSubscriptionPayment = async (params: {
       where: { id: resolvedUserId },
       select: {
         id: true,
-        subscriptionEndsAt: true
+        subscriptionEndsAt: true,
+        activeBusinessId: true
       }
     });
 
@@ -277,10 +283,13 @@ export const applySuccessfulSubscriptionPayment = async (params: {
       payload: params.payload
     } as Prisma.InputJsonValue;
 
+    const resolvedBusinessId = existingPayment?.businessId || metadataBusinessId || user.activeBusinessId || null;
+
     const payment = existingPayment
       ? await tx.subscriptionPayment.update({
           where: { id: existingPayment.id },
           data: {
+            businessId: resolvedBusinessId,
             status: 'successful',
             amountMinor,
             currencyCode,
@@ -293,6 +302,7 @@ export const applySuccessfulSubscriptionPayment = async (params: {
         })
       : await tx.subscriptionPayment.create({
           data: {
+            businessId: resolvedBusinessId,
             userId: user.id,
             provider: 'paystack',
             reference,
@@ -331,6 +341,7 @@ export const applySuccessfulSubscriptionPayment = async (params: {
 
     await tx.subscriptionGrant.create({
       data: {
+        businessId: resolvedBusinessId,
         userId: user.id,
         source: 'paid',
         status: 'premium',
@@ -346,6 +357,15 @@ export const applySuccessfulSubscriptionPayment = async (params: {
         } as Prisma.InputJsonValue
       }
     });
+
+    if (resolvedBusinessId) {
+      await tx.business.update({
+        where: { id: resolvedBusinessId },
+        data: {
+          subscriptionStatus: 'premium'
+        }
+      });
+    }
 
     return {
       payment,

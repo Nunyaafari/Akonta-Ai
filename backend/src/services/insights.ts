@@ -332,7 +332,8 @@ const buildHighlights = (insights: {
 };
 
 export const getMonthlyInsights = async (params: {
-  userId: string;
+  businessId: string;
+  userId?: string;
   year: number;
   month: number;
   now?: Date;
@@ -350,9 +351,10 @@ export const getMonthlyInsights = async (params: {
   const [transactions, budgets, user] = await Promise.all([
     db.transaction.findMany({
       where: {
-        userId: params.userId,
+        businessId: params.businessId,
         status: 'confirmed',
         correctionOfId: null,
+        isDeleted: false,
         date: {
           gte: periodStart,
           lte: effectivePeriodEnd
@@ -361,15 +363,17 @@ export const getMonthlyInsights = async (params: {
     }),
     db.budget.findMany({
       where: {
-        userId: params.userId,
+        businessId: params.businessId,
         periodType: 'monthly',
         periodStart
       }
     }),
-    db.user.findUnique({
-      where: { id: params.userId },
-      select: { currencyCode: true }
-    })
+    params.userId
+      ? db.user.findUnique({
+        where: { id: params.userId },
+        select: { currencyCode: true }
+      })
+      : Promise.resolve(null)
   ]);
 
   const targetStatus = computeTargetStatus({

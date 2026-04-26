@@ -5,6 +5,8 @@ import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import { config } from './lib/env.js';
 import userRoutes from './routes/users.js';
+import authRoutes from './routes/auth.js';
+import workspaceRoutes from './routes/workspaces.js';
 import transactionRoutes from './routes/transactions.js';
 import summaryRoutes from './routes/summaries.js';
 import budgetRoutes from './routes/budgets.js';
@@ -13,6 +15,31 @@ import whatsappRoutes from './routes/whatsapp.js';
 import chatRoutes from './routes/chat.js';
 import adminRoutes from './routes/admin.js';
 import subscriptionsRoutes from './routes/subscriptions.js';
+
+const isProduction = config.NODE_ENV === 'production';
+
+const validateProductionSecurityConfig = () => {
+  if (!isProduction) return;
+
+  const minSecretLength = 32;
+  if (!config.JWT_ACCESS_SECRET || config.JWT_ACCESS_SECRET.length < minSecretLength) {
+    throw new Error(`JWT_ACCESS_SECRET must be set and at least ${minSecretLength} chars in production.`);
+  }
+
+  if (!config.JWT_REFRESH_SECRET || config.JWT_REFRESH_SECRET.length < minSecretLength) {
+    throw new Error(`JWT_REFRESH_SECRET must be set and at least ${minSecretLength} chars in production.`);
+  }
+
+  if (config.ALLOW_LEGACY_USER_HEADER_AUTH) {
+    throw new Error('ALLOW_LEGACY_USER_HEADER_AUTH must be false in production.');
+  }
+
+  if (config.AUTH_EXPOSE_DEV_OTP) {
+    throw new Error('AUTH_EXPOSE_DEV_OTP must be false in production.');
+  }
+};
+
+validateProductionSecurityConfig();
 
 const app = Fastify({ logger: true });
 
@@ -34,6 +61,14 @@ const resolveApiKeyFromRequest = (authorizationHeader: unknown, apiKeyHeader: un
     return token.slice(7).trim();
   }
   return token;
+};
+
+const hasLikelyJwtBearer = (authorizationHeader: unknown): boolean => {
+  if (typeof authorizationHeader !== 'string') return false;
+  const token = authorizationHeader.trim();
+  if (!token.toLowerCase().startsWith('bearer ')) return false;
+  const value = token.slice(7).trim();
+  return value.split('.').length === 3;
 };
 
 app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_request, body, done) => {
@@ -76,7 +111,9 @@ app.addHook('onRequest', async (request, reply) => {
     '/api/subscriptions/webhook/paystack'
   ]);
 
-  if (publicPaths.has(path)) return;
+  if (publicPaths.has(path) || path.startsWith('/api/auth')) return;
+
+  if (hasLikelyJwtBearer(request.headers.authorization)) return;
 
   const providedKey = resolveApiKeyFromRequest(request.headers.authorization, request.headers['x-akonta-api-key']);
   if (!providedKey || !secureEqual(config.BACKEND_API_KEY, providedKey)) {
@@ -85,6 +122,8 @@ app.addHook('onRequest', async (request, reply) => {
 });
 
 await app.register(userRoutes, { prefix: '/api/users' });
+await app.register(authRoutes, { prefix: '/api/auth' });
+await app.register(workspaceRoutes, { prefix: '/api/workspaces' });
 await app.register(transactionRoutes, { prefix: '/api/transactions' });
 await app.register(summaryRoutes, { prefix: '/api/summaries' });
 await app.register(budgetRoutes, { prefix: '/api/budgets' });

@@ -1,0 +1,78 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-ledgermate}
+    volumes:
+      - akonta_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-ledgermate}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      APP_ORIGIN: ${APP_ORIGIN:-https://app.akonta.local}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:change_me@db:5432/ledgermate}
+      ALLOW_LEGACY_USER_HEADER_AUTH: "false"
+      AUTH_EXPOSE_DEV_OTP: "false"
+      JWT_ACCESS_SECRET_FILE: /run/secrets/akonta/jwt_access_secret
+      JWT_REFRESH_SECRET_FILE: /run/secrets/akonta/jwt_refresh_secret
+      BACKEND_API_KEY_FILE: /run/secrets/akonta/backend_api_key
+      ADMIN_API_KEY_FILE: /run/secrets/akonta/admin_api_key
+      OPENAI_API_KEY_FILE: /run/secrets/akonta/openai_api_key
+      TWILIO_AUTH_TOKEN_FILE: /run/secrets/akonta/twilio_auth_token
+      INFOBIP_API_KEY_FILE: /run/secrets/akonta/infobip_api_key
+      INFOBIP_WEBHOOK_AUTH_TOKEN_FILE: /run/secrets/akonta/infobip_webhook_auth_token
+      WHATCHIMP_API_KEY_FILE: /run/secrets/akonta/whatchimp_api_key
+      PAYSTACK_SECRET_KEY_FILE: /run/secrets/akonta/paystack_secret_key
+      PAYSTACK_WEBHOOK_SECRET_FILE: /run/secrets/akonta/paystack_webhook_secret
+    volumes:
+      - ${SECRETS_MOUNT_PATH:-/var/run/akonta-secrets}:/run/secrets/akonta:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:4000/api/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        VITE_API_BASE_URL: /api
+        NGINX_CONF: docker/nginx/production.conf
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ${TLS_CERTS_PATH:-./docker/certs}:/etc/nginx/certs:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null --no-check-certificate https://127.0.0.1/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  akonta_pg_data:

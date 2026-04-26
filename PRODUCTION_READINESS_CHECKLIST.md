@@ -62,9 +62,29 @@ Use this as a release gate. Every item must be marked **Pass** with evidence bef
 | Check | Pass Criteria | Evidence | Owner | Status |
 |---|---|---|---|---|
 | Containerized deployment | `docker compose`/orchestrator deployment reproducible from clean host | Deploy logs | DevOps | In progress |
-| TLS + secure headers | Public endpoints served via HTTPS, HSTS and secure CORS configured | Security scan | DevOps | Pending |
-| Secrets management | Secrets sourced from vault/secret manager, not repo files | Infra config | DevOps | Pending |
-| DB backups | Automated daily backups + retention policy + restore tested | Backup/restore logs | DevOps | Pending |
+| TLS + secure headers | Public endpoints served via HTTPS, HSTS and secure CORS configured | Security scan | DevOps | In progress |
+| Secrets management | Secrets sourced from vault/secret manager, not repo files | Infra config | DevOps | In progress |
+| DB backups | Automated daily backups + retention policy + restore tested | Backup/restore logs | DevOps | In progress |
+
+### Item 4 Progress (2026-04-26)
+- Added production deployment artifacts for reproducible container rollout:
+1. `docker-compose.production.yml`
+2. `.env.production.example`
+3. `Dockerfile.frontend` now accepts `NGINX_CONF` build arg for deterministic environment-specific builds.
+- Added hardened TLS + header edge config:
+1. `docker/nginx/production.conf` (HTTPS redirect, TLS 1.2/1.3, HSTS, secure headers, API proxy)
+2. `docker/nginx/default.conf` updated with baseline security headers and health endpoint.
+3. Backend runtime hardened with `trustProxy`, strict CORS origin matching, and production HSTS via Helmet.
+- Added secrets-manager compatible wiring:
+1. `backend/src/lib/env.ts` now supports `*_FILE` env references.
+2. `backend/.env.example` documents supported secret file variables.
+3. `docker-compose.production.yml` uses mounted secret-file paths under `/run/secrets/akonta`.
+- Added backup retention verification automation:
+1. `backend/scripts/verify-backup-retention.mjs`
+2. `npm run ops:verify-backup-retention`
+3. Supports local and S3 retention checks with optional restore smoke test and JSON evidence report output.
+- Added infra CI gate:
+1. `.github/workflows/infra-hardening.yml` (builds production images, validates compose config, and verifies HTTPS security headers).
 
 ## 5) Observability & Alerting
 | Check | Pass Criteria | Evidence | Owner | Status |
@@ -144,3 +164,4 @@ Use this as a release gate. Every item must be marked **Pass** with evidence bef
 1. Finish role-aware frontend gating matrix validation (cashier/viewer restrictions) with screenshots/evidence.
 2. Run end-to-end OTP/workspace/member lifecycle tests on desktop + mobile viewport and attach artifacts.
 3. Perform staging migration rehearsal and publish validation report before production cutover.
+4. Run infra hardening checks in staging (`docker-compose.production.yml`, TLS header scan, and backup retention verifier) and attach logs/reports.

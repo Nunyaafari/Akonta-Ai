@@ -29,6 +29,13 @@ This backend now supports multi-user business workspaces with role-based access,
 - `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET` for session token signing.
 - `BACKEND_API_KEY` and `ADMIN_API_KEY` for service/admin key protection.
 - `TWILIO_WEBHOOK_VALIDATE_SIGNATURE`, `TWILIO_WEBHOOK_URL`, `INFOBIP_WEBHOOK_AUTH_TOKEN` for webhook hardening.
+- `APP_ORIGIN` supports one origin or comma-separated origins for strict CORS.
+- File-based secret wiring is supported with `*_FILE` variants (for secret manager mounts), e.g.:
+  - `JWT_ACCESS_SECRET_FILE`
+  - `JWT_REFRESH_SECRET_FILE`
+  - `BACKEND_API_KEY_FILE`
+  - `ADMIN_API_KEY_FILE`
+  - `OPENAI_API_KEY_FILE`
 
 ## API overview
 
@@ -84,3 +91,11 @@ This release includes migration folder:
 - `prisma/migrations/202604251230_multi_user_workspace/migration.sql`
 
 Use the runbook in `backend/MULTI_USER_CUTOVER.md` for backup, verification, smoke checks, and rollback.
+
+## Production Infra Hardening
+
+- Production compose stack: `docker-compose.production.yml`
+- Hardened TLS/headers Nginx: `docker/nginx/production.conf`
+- Staging migration rehearsal: `backend/STAGING_MIGRATION_REHEARSAL.md`
+- Backup retention verification: `npm run ops:verify-backup-retention`
+- Infra hardening runbook: `INFRA_HARDENING_RUNBOOK.md`

@@ -41,7 +41,17 @@ const validateProductionSecurityConfig = () => {
 
 validateProductionSecurityConfig();
 
-const app = Fastify({ logger: true });
+const app = Fastify({
+  logger: true,
+  trustProxy: true
+});
+
+const isAllowedCorsOrigin = (origin: string | undefined): boolean => {
+  if (!origin) return true;
+  if (config.APP_ORIGINS.includes('*')) return true;
+  const normalized = origin.replace(/\/$/, '');
+  return config.APP_ORIGINS.includes(normalized);
+};
 
 const secureEqual = (a: string, b: string): boolean => {
   const left = Buffer.from(a);
@@ -81,10 +91,23 @@ app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string
 });
 
 await app.register(cors, {
-  origin: [config.APP_ORIGIN],
+  origin: (origin, callback) => {
+    callback(null, isAllowedCorsOrigin(origin));
+  },
+  credentials: true
 });
 
-await app.register(helmet);
+await app.register(helmet, {
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+  hsts: isProduction
+    ? {
+      maxAge: 31536000,
+      includeSubDomains: true,
+      preload: true
+    }
+    : false
+});
 
 app.addHook('onRequest', async (request, reply) => {
   const path = request.url.split('?')[0];

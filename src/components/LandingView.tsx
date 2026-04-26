@@ -23,9 +23,20 @@ export const LandingView: React.FC<LandingViewProps> = ({ setView, heroSlide, se
             <img src="/brand/akonta.svg" alt="Akonta AI logo" className="h-10 w-auto object-contain" />
             <span className="text-xl font-bold text-gray-900">Akonta AI</span>
           </div>
-          <button onClick={() => setView('auth')} className="px-4 py-2 bg-green-500 text-white rounded-full font-medium hover:bg-green-600 transition-colors">
-            Sign In
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setView('auth')}
+              className="px-4 py-2 bg-green-500 text-white rounded-full font-medium hover:bg-green-600 transition-colors"
+            >
+              Sign In
+            </button>
+            <button
+              onClick={() => setView('onboarding')}
+              className="px-4 py-2 border border-green-200 text-green-700 rounded-full font-medium hover:bg-green-50 transition-colors"
+            >
+              Create Account
+            </button>
+          </div>
         </div>
       </header>
 
@@ -99,8 +110,21 @@ export const LandingView: React.FC<LandingViewProps> = ({ setView, heroSlide, se
           </div>
 
           <div className="mt-20 grid gap-6 md:grid-cols-2">
-            <PricingCard plan="Free" price="0" features={["Daily logging", "Weekly summaries", "Monthly summaries"]} onAction={() => setView('onboarding')} />
-            <PricingCard plan="Premium" price="50" features={["Advanced AI insights", "Expense breakdown", "Cash flow warnings", "PDF reports"]} onAction={() => setView('onboarding')} featured />
+            <PricingCard
+              plan="Free"
+              price="0"
+              actionLabel="Create Account"
+              features={["Daily logging", "Weekly summaries", "Monthly summaries"]}
+              onAction={() => setView('onboarding')}
+            />
+            <PricingCard
+              plan="Premium"
+              price="50"
+              actionLabel="Create Account"
+              features={["Advanced AI insights", "Expense breakdown", "Cash flow warnings", "PDF reports"]}
+              onAction={() => setView('onboarding')}
+              featured
+            />
           </div>
         </div>
       </main>
@@ -124,7 +148,7 @@ const FeatureCard = ({ icon: Icon, title, desc, color }: any) => (
   </div>
 );
 
-const PricingCard = ({ plan, price, features, onAction, featured }: any) => (
+const PricingCard = ({ plan, price, features, onAction, featured, actionLabel = 'Create Account' }: any) => (
   <div className={`bg-white rounded-3xl border ${featured ? 'border-green-500' : 'border-gray-200'} p-6 shadow-sm`}>
     <div className="flex justify-between items-center mb-4">
       <div><p className="text-lg font-semibold">{plan} Plan</p></div>
@@ -138,7 +162,7 @@ const PricingCard = ({ plan, price, features, onAction, featured }: any) => (
       {features.map((f: string) => <p key={f}>✅ {f}</p>)}
     </div>
     <button onClick={onAction} className={`w-full py-4 rounded-2xl font-semibold transition-colors ${featured ? 'bg-green-500 text-white hover:bg-green-600' : 'border border-green-500 text-green-600 hover:bg-green-50'}`}>
-      Get Started
+      {actionLabel}
     </button>
   </div>
 );

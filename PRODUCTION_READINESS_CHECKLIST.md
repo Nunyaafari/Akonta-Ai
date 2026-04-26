@@ -64,9 +64,17 @@ Use this as a release gate. Every item must be marked **Pass** with evidence bef
 ## 6) Test Gate
 | Check | Pass Criteria | Evidence | Owner | Status |
 |---|---|---|---|---|
-| Integration tests | Workspace invite, OTP, auth refresh, approval flow, chat regression all passing | CI artifact | Backend | In progress |
+| Integration tests | Workspace invite, OTP, auth refresh, approval flow, chat regression all passing | CI artifact | Backend | Pass |
 | E2E tests | Core user journeys pass on desktop/mobile | CI artifact | QA/Frontend | Pending |
-| Security tests | Cross-workspace access denied for all sensitive routes | CI artifact | Backend/QA | In progress |
+| Security tests | Cross-workspace access denied for all sensitive routes | CI artifact | Backend/QA | Pass |
+
+### Item 3 CI Evidence (2026-04-26)
+- GitHub Actions workflow run: `Backend Integration`
+1. Run ID: `24954068727`
+2. Commit: `68b86fabcf915a047cff7397d08075d2fed36908`
+3. Event: `push` on `main`
+4. Result: `completed / success`
+5. URL: `https://github.com/Nunyaafari/Akonta-Ai/actions/runs/24954068727`
 
 ### Item 3 Progress (2026-04-25)
 - Added CI workflow for backend integration/security suites:
@@ -93,6 +101,6 @@ Use this as a release gate. Every item must be marked **Pass** with evidence bef
 ---
 
 ## Immediate Next Actions
-1. Run the new GitHub Actions workflow once to generate the first CI artifact and move Item 6 integration/security checks from In progress to Pass.
-2. Finish role-aware frontend gating matrix validation (cashier/viewer restrictions) with screenshots/evidence.
+1. Finish role-aware frontend gating matrix validation (cashier/viewer restrictions) with screenshots/evidence.
+2. Run end-to-end OTP/workspace/member lifecycle tests on desktop + mobile viewport and attach artifacts.
 3. Perform staging migration rehearsal and publish validation report before production cutover.

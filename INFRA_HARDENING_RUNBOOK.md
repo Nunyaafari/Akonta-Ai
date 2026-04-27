@@ -77,7 +77,7 @@ Supported file-based secrets include:
 
 Production compose expects a mounted directory:
 
-1. Host path: `SECRETS_MOUNT_PATH` (default `/var/run/akonta-secrets`)
+1. Host path: `SECRETS_MOUNT_PATH` (default `./docker/secrets/local`; production override example: `/var/run/akonta-secrets`)
 2. Container path: `/run/secrets/akonta`
 
 Required filenames in the mount:

@@ -40,6 +40,7 @@ enum TransactionSourceChannel {
 
 enum SubscriptionStatus {
   free
+  basic
   premium
   trial
 }
@@ -52,6 +53,7 @@ enum PeriodType {
 enum ConversationChannel {
   web
   whatsapp
+  telegram
 }
 
 enum CustomLineItemKind {
@@ -136,6 +138,8 @@ model User {
   email                        String?              @unique
   phoneNumber                  String               @unique
   whatsappNumber               String?
+  telegramChatId               String?              @unique
+  telegramUsername             String?
   businessName                 String?
   businessType                 String?
   preferredTime                String?
@@ -510,7 +514,8 @@ model AppConfig {
   paystackPublicKey     String?
   paystackSecretKey     String?
   paystackWebhookSecret String?
-  paystackPremiumAmount Int              @default(50)
+  paystackBasicAmount   Int              @default(60)
+  paystackPremiumAmount Int              @default(200)
   paystackCurrencyCode  String           @default("GHS")
   whatchimpBaseUrl      String?
   whatchimpApiKey       String?

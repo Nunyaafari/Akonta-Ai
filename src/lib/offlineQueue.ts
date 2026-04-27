@@ -5,7 +5,7 @@ export type PendingChatMessage = {
   userId: string;
   clientMessageId: string;
   message: string;
-  channel: 'web' | 'whatsapp';
+  channel: 'web' | 'whatsapp' | 'telegram';
   createdAt: string;
   attempts: number;
   lastError?: string;
@@ -35,7 +35,7 @@ export const enqueuePendingChatMessage = async (payload: {
   userId: string;
   clientMessageId: string;
   message: string;
-  channel?: 'web' | 'whatsapp';
+  channel?: 'web' | 'whatsapp' | 'telegram';
 }): Promise<PendingChatMessage> => {
   const item: PendingChatMessage = {
     id: createQueueId(),

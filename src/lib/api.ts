@@ -16,6 +16,7 @@ import type {
   BudgetTargetType,
   MonthlyInsights,
   ReferralProgress,
+  TelegramProviderStatus,
   WorkspaceMember,
   WorkspaceMembership,
   WorkspaceMembershipStatus,
@@ -481,6 +482,13 @@ const fallbackApi = async (path: string, init?: RequestInit) => {
     return mockGetWhatsAppProviderInfo();
   }
 
+  if (path === '/api/telegram/status' && method === 'GET') {
+    return {
+      enabled: false,
+      webhookSecretConfigured: false
+    } satisfies TelegramProviderStatus;
+  }
+
   if (path === '/api/budgets/current' && method === 'GET') {
     const params = new URLSearchParams(path.split('?')[1]);
     return mockGetCurrentBudgets(params.get('userId') ?? '');
@@ -729,7 +737,7 @@ export const getReferralProgress = async (userId: string): Promise<ReferralProgr
 export const activateUserSubscription = async (
   userId: string,
   payload: {
-    status?: 'free' | 'premium' | 'trial';
+    status?: 'free' | 'basic' | 'premium' | 'trial';
     source?: 'trial' | 'paid' | 'referral_bonus' | 'admin_adjustment';
     months?: number;
     note?: string;
@@ -818,6 +826,10 @@ export const getWhatsAppProviderInfo = async (): Promise<{ default: WhatsAppProv
   return fetchJson<{ default: WhatsAppProvider; available: WhatsAppProvider[] }>('/api/whatsapp/providers');
 };
 
+export const getTelegramProviderStatus = async (): Promise<TelegramProviderStatus> => {
+  return fetchJson<TelegramProviderStatus>('/api/telegram/status');
+};
+
 export const getAdminAnalytics = async (): Promise<AdminAnalytics> => {
   return fetchAdminJson<AdminAnalytics>('/api/admin/analytics');
 };
@@ -860,6 +872,7 @@ export const setAdminPaymentSettings = async (
 
 export const initializeSubscriptionPayment = async (payload: {
   userId: string;
+  plan?: 'basic' | 'premium';
   months?: number;
   callbackUrl?: string;
   customerEmail?: string;
@@ -902,7 +915,7 @@ export const postBudget = async (budget: {
 export const postChatEntry = async (
   userId: string,
   message: string,
-  channel: 'web' | 'whatsapp' = 'web'
+  channel: 'web' | 'whatsapp' | 'telegram' = 'web'
 ): Promise<{
   botReply: string;
   conversation: {

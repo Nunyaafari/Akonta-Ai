@@ -10,7 +10,7 @@ import {
   REFERRAL_MILESTONE_SIZE
 } from '../services/referrals.js';
 
-const subscriptionStatuses = ['free', 'premium', 'trial'] as const;
+const subscriptionStatuses = ['free', 'basic', 'premium', 'trial'] as const;
 const subscriptionSources = ['trial', 'paid', 'referral_bonus', 'admin_adjustment'] as const;
 const preferredTimeValues = ['morning', 'afternoon', 'evening'] as const;
 
@@ -79,7 +79,7 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
       businessType?: string;
       preferredTime?: string;
       timezone?: string;
-      subscriptionStatus?: 'free' | 'premium' | 'trial';
+      subscriptionStatus?: 'free' | 'basic' | 'premium' | 'trial';
       currencyCode?: string;
       referralCode?: string;
     };
@@ -179,16 +179,16 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
               note: 'Initial trial period'
             }
           });
-        } else if (desiredSubscriptionStatus === 'premium') {
+        } else if (desiredSubscriptionStatus === 'basic' || desiredSubscriptionStatus === 'premium') {
           await tx.subscriptionGrant.create({
             data: {
               businessId: createdBusiness.id,
               userId: created.id,
               source: 'paid',
-              status: 'premium',
+              status: desiredSubscriptionStatus,
               monthsGranted: 0,
               startsAt: now,
-              note: 'Initial premium activation'
+              note: `Initial ${desiredSubscriptionStatus} activation`
             }
           });
         }
@@ -274,7 +274,7 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
     };
 
     if (body.status && !isSubscriptionStatus(body.status)) {
-      return reply.status(400).send({ message: 'status must be free, trial, or premium.' });
+      return reply.status(400).send({ message: 'status must be free, trial, basic, or premium.' });
     }
 
     if (body.source && !isSubscriptionSource(body.source)) {
@@ -292,8 +292,8 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
 
     const now = new Date();
     const nextStatus = body.status ?? existing.subscriptionStatus;
-    const source = body.source ?? (nextStatus === 'premium' ? 'paid' : nextStatus === 'trial' ? 'trial' : 'admin_adjustment');
-    const extensionMonths = Math.floor(body.months ?? (nextStatus === 'premium' ? 1 : 0));
+    const source = body.source ?? ((nextStatus === 'basic' || nextStatus === 'premium') ? 'paid' : nextStatus === 'trial' ? 'trial' : 'admin_adjustment');
+    const extensionMonths = Math.floor(body.months ?? ((nextStatus === 'basic' || nextStatus === 'premium') ? 1 : 0));
     const trialEndsAt = nextStatus === 'trial'
       ? addMonthsUtc(now, INITIAL_TRIAL_MONTHS)
       : null;
@@ -303,7 +303,7 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
 
     const updated = await db.$transaction(async (tx) => {
       let subscriptionEndsAt = existing.subscriptionEndsAt;
-      if (nextStatus === 'premium') {
+      if (nextStatus === 'basic' || nextStatus === 'premium') {
         const anchor = subscriptionEndsAt && subscriptionEndsAt > now ? subscriptionEndsAt : now;
         startsAt = anchor;
         endsAt = extensionMonths > 0 ? addMonthsUtc(anchor, extensionMonths) : subscriptionEndsAt;
@@ -327,6 +327,7 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
 
       await tx.subscriptionGrant.create({
         data: {
+          businessId: existing.activeBusinessId ?? undefined,
           userId: id,
           source,
           status: nextStatus,
@@ -336,6 +337,22 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
           note: body.note ?? null
         }
       });
+
+      if (existing.activeBusinessId) {
+        await tx.business.update({
+          where: { id: existing.activeBusinessId },
+          data: {
+            subscriptionStatus: nextStatus
+          }
+        });
+      } else {
+        await tx.business.updateMany({
+          where: { ownerUserId: id },
+          data: {
+            subscriptionStatus: nextStatus
+          }
+        });
+      }
 
       return nextUser;
     });

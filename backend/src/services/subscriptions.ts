@@ -11,6 +11,8 @@ interface PaystackEnvelope<TData = unknown> {
   data?: TData;
 }
 
+type SubscriptionPlan = 'basic' | 'premium';
+
 const addMonthsUtc = (value: Date, months: number): Date => {
   const next = new Date(value);
   next.setUTCMonth(next.getUTCMonth() + months);
@@ -33,6 +35,17 @@ const randomReference = (): string => {
   return `akonta_${Date.now()}_${suffix}`;
 };
 
+const normalizeSubscriptionPlan = (value: unknown, fallback: SubscriptionPlan = 'basic'): SubscriptionPlan => {
+  if (value === 'premium') return 'premium';
+  if (value === 'basic') return 'basic';
+  return fallback;
+};
+
+const resolveStatusAfterPlanPurchase = (currentStatus: string, purchasedPlan: SubscriptionPlan): SubscriptionPlan => {
+  if (purchasedPlan === 'premium') return 'premium';
+  return currentStatus === 'premium' ? 'premium' : 'basic';
+};
+
 const getPaystackConfig = async () => {
   try {
     const settings = await db.appConfig.findUnique({
@@ -41,6 +54,7 @@ const getPaystackConfig = async () => {
         paystackPublicKey: true,
         paystackSecretKey: true,
         paystackWebhookSecret: true,
+        paystackBasicAmount: true,
         paystackPremiumAmount: true,
         paystackCurrencyCode: true
       }
@@ -50,9 +64,12 @@ const getPaystackConfig = async () => {
       publicKey: asTrimmedString(settings?.paystackPublicKey) || config.PAYSTACK_PUBLIC_KEY,
       secretKey: asTrimmedString(settings?.paystackSecretKey) || config.PAYSTACK_SECRET_KEY,
       webhookSecret: asTrimmedString(settings?.paystackWebhookSecret) || config.PAYSTACK_WEBHOOK_SECRET,
+      basicAmountMajor: settings?.paystackBasicAmount && settings.paystackBasicAmount > 0
+        ? settings.paystackBasicAmount
+        : parsePositiveInt(config.PAYSTACK_BASIC_AMOUNT, 60),
       premiumAmountMajor: settings?.paystackPremiumAmount && settings.paystackPremiumAmount > 0
         ? settings.paystackPremiumAmount
-        : parsePositiveInt(config.PAYSTACK_PREMIUM_AMOUNT, 50),
+        : parsePositiveInt(config.PAYSTACK_PREMIUM_AMOUNT, 200),
       currencyCode: asTrimmedString(settings?.paystackCurrencyCode) || config.PAYSTACK_CURRENCY_CODE || 'GHS'
     };
   } catch {
@@ -60,7 +77,8 @@ const getPaystackConfig = async () => {
       publicKey: config.PAYSTACK_PUBLIC_KEY,
       secretKey: config.PAYSTACK_SECRET_KEY,
       webhookSecret: config.PAYSTACK_WEBHOOK_SECRET,
-      premiumAmountMajor: parsePositiveInt(config.PAYSTACK_PREMIUM_AMOUNT, 50),
+      basicAmountMajor: parsePositiveInt(config.PAYSTACK_BASIC_AMOUNT, 60),
+      premiumAmountMajor: parsePositiveInt(config.PAYSTACK_PREMIUM_AMOUNT, 200),
       currencyCode: config.PAYSTACK_CURRENCY_CODE || 'GHS'
     };
   }
@@ -86,6 +104,7 @@ const verifyPaystackReference = async (reference: string, secretKey: string): Pr
 
 export const initializeSubscriptionPayment = async (params: {
   userId: string;
+  plan?: SubscriptionPlan;
   months?: number;
   callbackUrl?: string;
   customerEmail?: string;
@@ -111,7 +130,9 @@ export const initializeSubscriptionPayment = async (params: {
   }
 
   const months = parsePositiveInt(params.months, 1);
-  const amountMajor = settings.premiumAmountMajor * months;
+  const plan = normalizeSubscriptionPlan(params.plan);
+  const planAmountMajor = plan === 'premium' ? settings.premiumAmountMajor : settings.basicAmountMajor;
+  const amountMajor = planAmountMajor * months;
   const amountMinor = amountMajor * 100;
   const currencyCode = asTrimmedString(settings.currencyCode || user.currencyCode || 'GHS').toUpperCase();
   const reference = randomReference();
@@ -135,6 +156,7 @@ export const initializeSubscriptionPayment = async (params: {
         userId: user.id,
         businessId: user.activeBusinessId,
         months,
+        plan,
         userName: user.name,
         phoneNumber: user.phoneNumber,
         source: 'akonta-subscription'
@@ -165,7 +187,8 @@ export const initializeSubscriptionPayment = async (params: {
       customerEmail,
       metadata: {
         initializeResponse: initializeBody.data,
-        source: 'initialize'
+        source: 'initialize',
+        plan
       } as Prisma.InputJsonValue
     }
   });
@@ -177,6 +200,7 @@ export const initializeSubscriptionPayment = async (params: {
     amountMinor,
     amountMajor,
     currencyCode,
+    plan,
     months,
     publicKey: settings.publicKey || null
   };
@@ -197,6 +221,13 @@ const markPaymentFailedIfPresent = async (reference: string, metadata?: Prisma.I
 const parseMonthsFromVerification = (verificationData: any, fallback = 1): number => {
   const metadataMonths = verificationData?.metadata?.months;
   return parsePositiveInt(metadataMonths, fallback);
+};
+
+const parsePlanFromPaymentMetadata = (metadata: Prisma.JsonValue | null | undefined): SubscriptionPlan | null => {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
+  const maybePlan = (metadata as Record<string, unknown>).plan;
+  if (maybePlan === 'basic' || maybePlan === 'premium') return maybePlan;
+  return null;
 };
 
 const isSuccessfulPaystackStatus = (status: unknown): boolean => {
@@ -246,7 +277,8 @@ export const applySuccessfulSubscriptionPayment = async (params: {
         currencyCode: true,
         paidAt: true,
         channel: true,
-        customerEmail: true
+        customerEmail: true,
+        metadata: true
       }
     });
 
@@ -262,6 +294,7 @@ export const applySuccessfulSubscriptionPayment = async (params: {
       select: {
         id: true,
         subscriptionEndsAt: true,
+        subscriptionStatus: true,
         activeBusinessId: true
       }
     });
@@ -271,6 +304,9 @@ export const applySuccessfulSubscriptionPayment = async (params: {
     }
 
     const monthsPurchased = parseMonthsFromVerification(verificationData, existingPayment?.monthsPurchased ?? 1);
+    const planFromVerification = normalizeSubscriptionPlan(verificationData?.metadata?.plan, 'basic');
+    const planFromExistingPayment = parsePlanFromPaymentMetadata(existingPayment?.metadata);
+    const purchasedPlan = planFromExistingPayment ?? planFromVerification;
     const amountMinor = parsePositiveInt(verificationData?.amount, existingPayment?.amountMinor ?? 0);
     const currencyCode = asTrimmedString(verificationData?.currency || existingPayment?.currencyCode || settings.currencyCode).toUpperCase();
     const paidAt = verificationData?.paid_at ? new Date(verificationData.paid_at) : new Date();
@@ -280,7 +316,8 @@ export const applySuccessfulSubscriptionPayment = async (params: {
     const metadata = {
       verificationData,
       source: params.source,
-      payload: params.payload
+      payload: params.payload,
+      plan: purchasedPlan
     } as Prisma.InputJsonValue;
 
     const resolvedBusinessId = existingPayment?.businessId || metadataBusinessId || user.activeBusinessId || null;
@@ -333,7 +370,7 @@ export const applySuccessfulSubscriptionPayment = async (params: {
     const updatedUser = await tx.user.update({
       where: { id: user.id },
       data: {
-        subscriptionStatus: 'premium',
+        subscriptionStatus: resolveStatusAfterPlanPurchase(user.subscriptionStatus, purchasedPlan),
         trialEndsAt: null,
         subscriptionEndsAt: endsAt
       }
@@ -344,25 +381,30 @@ export const applySuccessfulSubscriptionPayment = async (params: {
         businessId: resolvedBusinessId,
         userId: user.id,
         source: 'paid',
-        status: 'premium',
+        status: resolveStatusAfterPlanPurchase(user.subscriptionStatus, purchasedPlan),
         monthsGranted: monthsPurchased,
         startsAt: anchor,
         endsAt,
-        note: 'Paystack subscription payment',
+        note: `Paystack subscription payment (${purchasedPlan})`,
         metadata: {
           reference,
           amountMinor,
           currencyCode,
-          channel: channel || null
+          channel: channel || null,
+          plan: purchasedPlan
         } as Prisma.InputJsonValue
       }
     });
 
     if (resolvedBusinessId) {
+      const business = await tx.business.findUnique({
+        where: { id: resolvedBusinessId },
+        select: { subscriptionStatus: true }
+      });
       await tx.business.update({
         where: { id: resolvedBusinessId },
         data: {
-          subscriptionStatus: 'premium'
+          subscriptionStatus: resolveStatusAfterPlanPurchase(business?.subscriptionStatus ?? 'free', purchasedPlan)
         }
       });
     }

@@ -2,19 +2,27 @@ export interface User {
   id: string;
   name: string;
   phoneNumber: string;
+  whatsappNumber?: string | null;
+  telegramChatId?: string | null;
+  telegramUsername?: string | null;
   businessName: string;
   businessType: string;
   preferredTime: 'morning' | 'afternoon' | 'evening';
   timezone: string;
   currencyCode?: string;
-  subscriptionStatus: 'free' | 'premium' | 'trial';
-  trialEndsAt?: Date;
+  subscriptionStatus: 'free' | 'basic' | 'premium' | 'trial';
+  trialEndsAt?: Date | string | null;
   subscriptionEndsAt?: Date | string | null;
   freeSubscriptionMonthsEarned?: number;
   referralCode?: string | null;
   referredByUserId?: string | null;
   isSuperAdmin?: boolean;
   createdAt: Date;
+}
+
+export interface TelegramProviderStatus {
+  enabled: boolean;
+  webhookSecretConfigured: boolean;
 }
 
 export interface Transaction {
@@ -210,6 +218,7 @@ export interface AdminPaymentSettings {
   paystackPublicKey: string;
   paystackSecretKey: string;
   paystackWebhookSecret: string;
+  basicAmount: number;
   premiumAmount: number;
   currencyCode: string;
 }
@@ -221,6 +230,7 @@ export interface SubscriptionPaymentInitialization {
   amountMinor: number;
   amountMajor: number;
   currencyCode: string;
+  plan: 'basic' | 'premium';
   months: number;
   publicKey: string | null;
 }
@@ -252,7 +262,7 @@ export interface ReferralProgress {
       id: string;
       name: string;
       businessName: string | null;
-      subscriptionStatus: 'free' | 'premium' | 'trial';
+      subscriptionStatus: 'free' | 'basic' | 'premium' | 'trial';
     };
   }>;
 }
@@ -331,8 +341,23 @@ export interface AdminAnalytics {
     total: number;
     subscribed: number;
     paid: number;
+    basic: number;
+    premium: number;
     trial: number;
     free: number;
+  };
+  tiers: {
+    free: number;
+    basic: number;
+    premium: number;
+    trial: number;
+  };
+  businesses: {
+    total: number;
+    free: number;
+    basic: number;
+    premium: number;
+    trial: number;
   };
   subscriptions: {
     paidStarts: number;
@@ -340,6 +365,32 @@ export interface AdminAnalytics {
       date: string;
       count: number;
       revenue: number;
+    }>;
+  };
+  locations: Array<{
+    location: string;
+    count: number;
+  }>;
+  channels: {
+    app: number;
+    whatsapp: number;
+    system: number;
+  };
+  activity: {
+    last30Days: {
+      transactions: number;
+      revenue: number;
+      expenses: number;
+      net: number;
+    };
+    recent: Array<{
+      id: string;
+      type: 'audit' | 'transaction' | 'subscription';
+      title: string;
+      description: string;
+      businessName: string;
+      actorName: string;
+      occurredAt: string;
     }>;
   };
   referrals: {

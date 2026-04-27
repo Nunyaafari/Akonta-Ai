@@ -36,8 +36,10 @@ services:
       WHATCHIMP_API_KEY_FILE: /run/secrets/akonta/whatchimp_api_key
       PAYSTACK_SECRET_KEY_FILE: /run/secrets/akonta/paystack_secret_key
       PAYSTACK_WEBHOOK_SECRET_FILE: /run/secrets/akonta/paystack_webhook_secret
+      TELEGRAM_BOT_TOKEN_FILE: /run/secrets/akonta/telegram_bot_token
+      TELEGRAM_WEBHOOK_SECRET_FILE: /run/secrets/akonta/telegram_webhook_secret
     volumes:
-      - ${SECRETS_MOUNT_PATH:-/var/run/akonta-secrets}:/run/secrets/akonta:ro
+      - ${SECRETS_MOUNT_PATH:-./docker/secrets/local}:/run/secrets/akonta:ro
     depends_on:
       db:
         condition: service_healthy

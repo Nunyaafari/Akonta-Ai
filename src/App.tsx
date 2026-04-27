@@ -20,7 +20,7 @@ import {
 import { 
   ChartIcon, HistoryIcon,
   SendIcon, TrendingUpIcon, TrendingDownIcon, HomeIcon, 
-  CalendarIcon, ArrowLeftIcon, CheckIcon, ClockIcon, BellIcon, ChatIcon, SettingsIcon, ShieldIcon
+  CalendarIcon, ArrowLeftIcon, CheckIcon, ClockIcon, BellIcon, ChatIcon, SettingsIcon
 } from './components/Icons';
 import { 
   mockTransactions, currentWeekSummary, currentMonthSummary, 
@@ -40,7 +40,9 @@ import {
   getMonthlyInsights,
   getMonthlySummary,
   getReferralProgress,
+  getTelegramProviderStatus,
   getTransactions,
+  getUser,
   getWeeklySummary,
   initializeSubscriptionPayment,
   isOfflineSyncError,
@@ -87,12 +89,23 @@ import {
 const brandMarkSrc = '/brand/akonta.svg';
 const appCopyrightNotice = `© ${new Date().getFullYear()} All rights reserved. Amagold Technologies Ltd.`;
 const supportedCurrencies = ['GHS', 'USD', 'NGN', 'KES', 'EUR', 'GBP'] as const;
+const planEquivalentLabel = {
+  basic: 'Approx: NGN 1,500 • ZMW 100 • USD 4',
+  premium: 'Approx: NGN 5,000 • ZMW 330 • USD 13'
+} as const;
+const ADMIN_COCKPIT_PATH = '/admin';
+
+const isAdminCockpitPath = (pathname: string): boolean =>
+  pathname === ADMIN_COCKPIT_PATH || pathname.startsWith(`${ADMIN_COCKPIT_PATH}/`);
+
+const resolveViewFromPathname = (pathname: string): AppView =>
+  isAdminCockpitPath(pathname) ? 'admin' : 'landing';
 
 const hasActivePremiumWindow = (user: User | null): boolean => {
   if (!user) return false;
   if (user.subscriptionStatus === 'free') return false;
   const accessEnd = parseDateValue(user.subscriptionEndsAt ?? user.trialEndsAt ?? null);
-  if (!accessEnd) return user.subscriptionStatus === 'premium';
+  if (!accessEnd) return user.subscriptionStatus === 'basic' || user.subscriptionStatus === 'premium';
   return accessEnd.getTime() > Date.now();
 };
 
@@ -242,7 +255,10 @@ const buildSalesProfitTrendPoints = (params: {
 type HistoryDatePreset = 'this_month' | 'last_month' | 'last_90_days' | 'all_time' | 'custom';
 
 export default function App() {
-  const [view, setView] = useState<AppView>('landing');
+  const [view, setView] = useState<AppView>(() => {
+    if (typeof window === 'undefined') return 'landing';
+    return resolveViewFromPathname(window.location.pathname);
+  });
   const [user, setUser] = useState<User | null>(null);
   const [authSession, setAuthSession] = useState<AuthSession | null>(null);
   const [authPhoneNumber, setAuthPhoneNumber] = useState('');
@@ -251,6 +267,7 @@ export default function App() {
   const [authDevOtpCode, setAuthDevOtpCode] = useState<string | null>(null);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [authStep, setAuthStep] = useState<'request' | 'verify'>('request');
+  const [adminLoginRequested, setAdminLoginRequested] = useState(false);
   const [workspaceSelectionId, setWorkspaceSelectionId] = useState<string>('');
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [messages, setMessages] = useState<ChatMessage[]>(chatMessages);
@@ -336,7 +353,7 @@ export default function App() {
   }, [queryClient]);
 
   const postChatEntryMutation = useMutation({
-    mutationFn: (payload: { userId: string; message: string; channel: 'web' | 'whatsapp' }) =>
+    mutationFn: (payload: { userId: string; message: string; channel: 'web' | 'whatsapp' | 'telegram' }) =>
       postChatEntry(payload.userId, payload.message, payload.channel)
   });
 
@@ -381,6 +398,7 @@ export default function App() {
   const initializeSubscriptionMutation = useMutation({
     mutationFn: (payload: {
       userId: string;
+      plan?: 'basic' | 'premium';
       months?: number;
       callbackUrl?: string;
       customerEmail?: string;
@@ -486,6 +504,23 @@ export default function App() {
     queryFn: () => getWorkspaceMembers()
   });
 
+  const telegramStatusQuery = useQuery({
+    queryKey: ['telegram-status', user?.id],
+    enabled: Boolean(user?.id),
+    queryFn: async () => {
+      const [provider, latestUser] = await Promise.all([
+        getTelegramProviderStatus(),
+        getUser(user!.id)
+      ]);
+      return {
+        ...provider,
+        telegramChatId: latestUser.telegramChatId ?? null,
+        telegramUsername: latestUser.telegramUsername ?? null
+      };
+    },
+    refetchOnWindowFocus: false
+  });
+
   const inviteWorkspaceMemberMutation = useMutation({
     mutationFn: (payload: {
       fullName: string;
@@ -563,6 +598,7 @@ export default function App() {
   const budgets = budgetsQuery.data ?? [];
   const workspaceMemberships = workspaceMembershipsQuery.data ?? [];
   const workspaceMembers = workspaceMembersQuery.data ?? [];
+  const telegramStatus = telegramStatusQuery.data ?? null;
   const adminAnalytics = adminAnalyticsQuery.data ?? null;
   const adminProviderInfo = adminProviderQuery.data ?? null;
   const adminPaymentSettings = adminPaymentSettingsQuery.data ?? null;
@@ -575,7 +611,9 @@ export default function App() {
       : null);
   const isAdminSaving = updateAdminProviderMutation.isPending || updateAdminPaymentMutation.isPending;
   const activeWorkspaceMembership = workspaceMemberships.find((membership) => membership.status === 'active') ?? null;
-  const canManageWorkspaceMembers = activeWorkspaceMembership?.role === 'owner';
+  const isWorkspacePremiumPlan = user?.subscriptionStatus === 'premium';
+  const canManageWorkspaceMembers = activeWorkspaceMembership?.role === 'owner' && isWorkspacePremiumPlan;
+  const hasPaidChannelAccess = user?.subscriptionStatus === 'basic' || user?.subscriptionStatus === 'premium';
 
   const activeWeeklySummary = weeklySummary ?? defaultWeeklySummary;
   const activeMonthlySummary = monthlySummary ?? {
@@ -1138,6 +1176,49 @@ export default function App() {
       </div>
     ) : null;
 
+  const resolvePostLoginView = useCallback((nextUser: User | null): AppView => {
+    if (adminLoginRequested) {
+      return 'admin';
+    }
+    if (typeof window !== 'undefined' && isAdminCockpitPath(window.location.pathname)) {
+      return 'admin';
+    }
+    return 'chat';
+  }, [adminLoginRequested]);
+
+  useEffect(() => {
+    if (view !== 'auth' && view !== 'admin' && adminLoginRequested) {
+      setAdminLoginRequested(false);
+    }
+  }, [adminLoginRequested, view]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const currentPath = window.location.pathname;
+    const onAdminPath = isAdminCockpitPath(currentPath);
+    if (view === 'admin' && !onAdminPath) {
+      window.history.replaceState({}, '', ADMIN_COCKPIT_PATH);
+      return;
+    }
+
+    if (view !== 'admin' && onAdminPath) {
+      window.history.replaceState({}, '', '/');
+    }
+  }, [view]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const handlePopState = () => {
+      const resolved = resolveViewFromPathname(window.location.pathname);
+      setView((previous) => (previous === resolved ? previous : resolved));
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const referral = params.get('ref');
@@ -1174,7 +1255,7 @@ export default function App() {
           if (!cancelled) {
             setAuthSession(getStoredAuthSession());
             setUser(parsedUser);
-            setView('chat');
+            setView(resolvePostLoginView(parsedUser));
           }
           return;
         }
@@ -1183,7 +1264,7 @@ export default function App() {
         if (!cancelled) {
           setLegacyUserContext(parsedUser.id);
           setUser(parsedUser);
-          setView('chat');
+          setView(resolvePostLoginView(parsedUser));
         }
       } catch (error) {
         console.error('Failed to restore user from storage', error);
@@ -1194,7 +1275,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [resolvePostLoginView]);
 
   useEffect(() => {
     if (user) {
@@ -1385,7 +1466,7 @@ export default function App() {
           setUser(result.user);
         }
         if (result.status === 'success') {
-          setSettingsNotice('Subscription payment confirmed. Premium is now active.');
+          setSettingsNotice('Subscription payment confirmed. Your paid plan is now active.');
         } else {
           setError('Payment verification did not return success yet. Please try again in a moment.');
         }
@@ -1574,7 +1655,9 @@ export default function App() {
       setWorkspaceSelectionId(response.session.businessId);
       setAuthOtpCode('');
       setAuthDevOtpCode(null);
-      setView('chat');
+      const nextView = resolvePostLoginView(response.user);
+      setView(nextView);
+      setAdminLoginRequested(false);
     } catch (verifyError) {
       console.error('Unable to verify OTP', verifyError);
       const message = verifyError instanceof Error ? verifyError.message : 'OTP verification failed.';
@@ -1596,6 +1679,7 @@ export default function App() {
       setLegacyUserContext(null);
       setUser(null);
       setMessages(chatMessages);
+      setAdminLoginRequested(false);
       setView('landing');
     }
   };
@@ -1640,7 +1724,13 @@ export default function App() {
       <div className="min-h-screen bg-gradient-to-br from-green-50 via-white to-emerald-50 px-4 py-8">
         <div className="mx-auto max-w-md">
           <button
-            onClick={() => setView('landing')}
+            onClick={() => {
+              if (adminLoginRequested) {
+                setView('admin');
+                return;
+              }
+              setView('landing');
+            }}
             className="mb-6 inline-flex items-center rounded-full border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
           >
             <ArrowLeftIcon size={16} className="mr-1 text-gray-500" />
@@ -1648,22 +1738,32 @@ export default function App() {
           </button>
 
           <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
-            <h1 className="text-2xl font-bold text-gray-900">Sign in to your workspace</h1>
+            <h1 className="text-2xl font-bold text-gray-900">
+              {adminLoginRequested ? 'Admin Login' : 'Sign in to your workspace'}
+            </h1>
             <p className="mt-2 text-sm text-gray-500">
-              Use your team phone number. We will verify with OTP and open your workspace role.
+              {adminLoginRequested
+                ? 'Use your super admin phone number. We will verify with OTP before opening the control room.'
+                : 'Use your team phone number. We will verify with OTP and open your workspace role.'}
             </p>
-            <div className="mt-4 grid gap-2 sm:grid-cols-2">
+            <div className={`mt-4 grid gap-2 ${adminLoginRequested ? '' : 'sm:grid-cols-2'}`}>
               <div className="rounded-2xl border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-800">
-                <p className="font-semibold">Existing user</p>
-                <p>Enter your phone and request OTP to sign in.</p>
+                <p className="font-semibold">{adminLoginRequested ? 'Super admin account' : 'Existing user'}</p>
+                <p>
+                  {adminLoginRequested
+                    ? 'Enter your phone and request OTP to continue to /admin.'
+                    : 'Enter your phone and request OTP to sign in.'}
+                </p>
               </div>
-              <button
-                onClick={() => setView('onboarding')}
-                className="rounded-2xl border border-gray-200 bg-white px-3 py-2 text-left text-xs text-gray-700 hover:bg-gray-50"
-              >
-                <p className="font-semibold">New business owner</p>
-                <p>Create account to set up your workspace.</p>
-              </button>
+              {!adminLoginRequested && (
+                <button
+                  onClick={() => setView('onboarding')}
+                  className="rounded-2xl border border-gray-200 bg-white px-3 py-2 text-left text-xs text-gray-700 hover:bg-gray-50"
+                >
+                  <p className="font-semibold">New business owner</p>
+                  <p>Create account to set up your workspace.</p>
+                </button>
+              )}
             </div>
 
             <div className="mt-5 space-y-3">
@@ -1734,12 +1834,14 @@ export default function App() {
             </div>
           </div>
 
-          <div className="mt-4 rounded-2xl border border-gray-200 bg-white px-4 py-4 text-sm text-gray-600">
-            Need a new workspace?{' '}
-            <button onClick={() => setView('onboarding')} className="font-semibold text-green-700 hover:text-green-800">
-              Create account
-            </button>
-          </div>
+          {!adminLoginRequested && (
+            <div className="mt-4 rounded-2xl border border-gray-200 bg-white px-4 py-4 text-sm text-gray-600">
+              Need a new workspace?{' '}
+              <button onClick={() => setView('onboarding')} className="font-semibold text-green-700 hover:text-green-800">
+                Create account
+              </button>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -1815,6 +1917,7 @@ export default function App() {
           window.history.replaceState({}, '', nextUrl.toString());
           setOnboardingReferralCode(null);
         }
+        setAdminLoginRequested(false);
         setView('auth');
       } catch (err) {
         console.error(err);
@@ -1995,8 +2098,7 @@ export default function App() {
               { id: 'chat' as AppView, icon: ChatIcon, label: 'Chat' },
               { id: 'dashboard' as AppView, icon: ChartIcon, label: 'Dashboard' },
               { id: 'history' as AppView, icon: HistoryIcon, label: 'History' },
-              { id: 'settings' as AppView, icon: SettingsIcon, label: 'Settings' },
-              ...(user?.isSuperAdmin ? [{ id: 'admin' as AppView, icon: ShieldIcon, label: 'Admin' }] : [])
+              { id: 'settings' as AppView, icon: SettingsIcon, label: 'Settings' }
             ].map((item) => (
               <button
                 key={item.id}
@@ -2437,7 +2539,6 @@ export default function App() {
           )}
         </div>
 
-        <BottomNav />
       </div>
     );
   }
@@ -2465,76 +2566,82 @@ export default function App() {
       <div className="min-h-screen bg-gray-100 pb-20">
         <DemoModeBanner />
 
-        {/* Header */}
-        <div className="bg-green-600 px-4 py-3 flex items-center gap-3 sticky top-0 z-10">
-          <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center p-1.5">
-            <img src={brandMarkSrc} alt="Akonta AI logo mark" className="h-full w-full object-contain" />
-          </div>
-          <div className="flex-1">
-            <p className="text-white font-semibold">Akonta AI</p>
-            <p className="text-green-100 text-xs">
-              {pendingSyncCount > 0
-                ? `${pendingSyncCount} pending sync entr${pendingSyncCount === 1 ? 'y' : 'ies'}${isOutboxSyncing ? ' (syncing...)' : ''}`
-                : 'Web chatbot active — WhatsApp integration also available.'}
-            </p>
-          </div>
-          <button className="p-2">
-            <BellIcon className="text-white" size={20} />
-          </button>
-        </div>
-
-        {/* Messages */}
-        <div className="p-4 space-y-3">
-          {messages.map((msg) => (
-            <div key={msg.id} className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[80%] ${msg.type === 'user' ? 'order-2' : 'order-1'}`}>
-                <div 
-                  className={`px-4 py-2 rounded-2xl ${
-                    msg.type === 'user' 
-                      ? 'bg-green-500 text-white rounded-tr-sm' 
-                      : 'bg-white text-gray-800 rounded-tl-sm shadow-sm'
-                  }`}
-                >
-                  <p className="whitespace-pre-line">{msg.content.split('**').map((part, i) => 
-                    i % 2 === 1 ? <strong key={i}>{part}</strong> : part
-                  )}</p>
-                  {msg.actionLabel && msg.actionRoute && (
-                    <button
-                      onClick={() => handleMessageAction(msg.actionRoute, msg.actionTransactionId)}
-                      className="mt-3 w-full rounded-full bg-green-500 px-4 py-2 text-sm font-semibold text-white hover:bg-green-600 transition-colors"
-                    >
-                      {msg.actionLabel}
-                    </button>
-                  )}
-                </div>
-                <p className={`text-xs text-gray-400 mt-1 ${msg.type === 'user' ? 'text-right' : 'text-left'}`}>
-                  {formatTime(msg.timestamp)}
-                  {msg.type === 'user' && msg.syncStatus === 'pending' ? ' • Pending sync' : ''}
-                  {msg.type === 'user' && msg.syncStatus === 'failed' ? ' • Sync failed' : ''}
-                </p>
-              </div>
+        <div className="mx-auto min-h-screen w-full max-w-md bg-gray-100 lg:border-x lg:border-gray-200">
+          {/* Header */}
+          <div className="bg-green-600 px-4 py-3 flex items-center gap-3 sticky top-0 z-10">
+            <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center p-1.5">
+              <img src={brandMarkSrc} alt="Akonta AI logo mark" className="h-full w-full object-contain" />
             </div>
-          ))}
-          <div ref={chatEndRef} />
+            <div className="flex-1">
+              <p className="text-white font-semibold">Akonta AI</p>
+              <p className="text-green-100 text-xs">
+                {pendingSyncCount > 0
+                  ? `${pendingSyncCount} pending sync entr${pendingSyncCount === 1 ? 'y' : 'ies'}${isOutboxSyncing ? ' (syncing...)' : ''}`
+                  : hasPaidChannelAccess
+                    ? 'Web + Telegram active • WhatsApp channel is active on your plan.'
+                    : 'Web + Telegram active • Upgrade to Basic or Premium for WhatsApp channel.'}
+              </p>
+            </div>
+            <button className="p-2">
+              <BellIcon className="text-white" size={20} />
+            </button>
+          </div>
+
+          {/* Messages */}
+          <div className="p-4 pb-28 space-y-3">
+            {messages.map((msg) => (
+              <div key={msg.id} className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[80%] ${msg.type === 'user' ? 'order-2' : 'order-1'}`}>
+                  <div
+                    className={`px-4 py-2 rounded-2xl ${
+                      msg.type === 'user'
+                        ? 'bg-green-500 text-white rounded-tr-sm'
+                        : 'bg-white text-gray-800 rounded-tl-sm shadow-sm'
+                    }`}
+                  >
+                    <p className="whitespace-pre-line">{msg.content.split('**').map((part, i) =>
+                      i % 2 === 1 ? <strong key={i}>{part}</strong> : part
+                    )}</p>
+                    {msg.actionLabel && msg.actionRoute && (
+                      <button
+                        onClick={() => handleMessageAction(msg.actionRoute, msg.actionTransactionId)}
+                        className="mt-3 w-full rounded-full bg-green-500 px-4 py-2 text-sm font-semibold text-white hover:bg-green-600 transition-colors"
+                      >
+                        {msg.actionLabel}
+                      </button>
+                    )}
+                  </div>
+                  <p className={`text-xs text-gray-400 mt-1 ${msg.type === 'user' ? 'text-right' : 'text-left'}`}>
+                    {formatTime(msg.timestamp)}
+                    {msg.type === 'user' && msg.syncStatus === 'pending' ? ' • Pending sync' : ''}
+                    {msg.type === 'user' && msg.syncStatus === 'failed' ? ' • Sync failed' : ''}
+                  </p>
+                </div>
+              </div>
+            ))}
+            <div ref={chatEndRef} />
+          </div>
         </div>
 
         {/* Input */}
-        <div className="fixed bottom-16 left-0 right-0 bg-gray-100 px-4 py-3">
-          <div className="max-w-lg mx-auto flex gap-2">
-            <input
-              type="text"
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              onKeyPress={(e) => e.key === 'Enter' && handleSend()}
-              placeholder="Type a message..."
-              className="flex-1 px-4 py-3 bg-white rounded-full border-0 focus:outline-none focus:ring-2 focus:ring-green-500"
-            />
-            <button
-              onClick={handleSend}
-              className="w-12 h-12 bg-green-500 rounded-full flex items-center justify-center text-white hover:bg-green-600 transition-colors"
-            >
-              <SendIcon size={20} />
-            </button>
+        <div className="fixed bottom-16 left-0 right-0 z-20">
+          <div className="mx-auto w-full max-w-md bg-gray-100 px-4 py-3 lg:border-x lg:border-gray-200">
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                onKeyPress={(e) => e.key === 'Enter' && handleSend()}
+                placeholder="Type a message..."
+                className="flex-1 px-4 py-3 bg-white rounded-full border-0 focus:outline-none focus:ring-2 focus:ring-green-500"
+              />
+              <button
+                onClick={handleSend}
+                className="w-12 h-12 bg-green-500 rounded-full flex items-center justify-center text-white hover:bg-green-600 transition-colors"
+              >
+                <SendIcon size={20} />
+              </button>
+            </div>
           </div>
         </div>
 
@@ -3063,106 +3170,321 @@ export default function App() {
       }
     };
 
-    if (!isSuperAdmin) {
+    if (!user) {
       return (
-        <div className="min-h-screen bg-gray-50 pb-20">
+        <div className="min-h-screen bg-slate-50">
           <div className="bg-white px-4 py-6 border-b border-gray-100">
-            <h1 className="text-2xl font-bold text-gray-900">Super Admin</h1>
-            <p className="text-sm text-gray-500">Access is restricted to super admin accounts.</p>
+            <h1 className="text-2xl font-bold text-gray-900">Admin Cockpit</h1>
+            <p className="text-sm text-gray-500">Super admin login is required to access this area.</p>
           </div>
-          <div className="px-4 py-6">
-            <div className="rounded-3xl border border-amber-200 bg-amber-50 p-6 text-sm text-amber-800">
-              You do not have super admin access for this account.
+          <div className="mx-auto w-full max-w-md px-4 py-8">
+            <div className="rounded-3xl border border-blue-200 bg-blue-50 p-6 text-sm text-blue-800">
+              Sign in with your super admin phone number to continue to the control room.
+            </div>
+            <div className="mt-4 flex items-center gap-3">
+              <button
+                onClick={() => {
+                  setError(null);
+                  setAuthNotice(null);
+                  setAuthDevOtpCode(null);
+                  setAuthOtpCode('');
+                  setAuthStep('request');
+                  setAdminLoginRequested(true);
+                  setView('auth');
+                }}
+                className="rounded-full bg-green-600 px-4 py-2 text-xs font-semibold text-white hover:bg-green-700"
+              >
+                Admin Login
+              </button>
+              <button
+                onClick={() => {
+                  setAdminLoginRequested(false);
+                  setView('landing');
+                }}
+                className="rounded-full border border-gray-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+              >
+                Back To Home
+              </button>
             </div>
           </div>
-          <BottomNav />
         </div>
       );
     }
 
-    return (
-      <div className="min-h-screen bg-gray-50 pb-20">
-        <div className="bg-white px-4 py-6 border-b border-gray-100">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <h1 className="text-2xl font-bold text-gray-900">Super Admin</h1>
-              <p className="text-gray-500 text-sm">Subscriptions, referrals, business mix, and channel settings</p>
+    if (!isSuperAdmin) {
+      return (
+        <div className="min-h-screen bg-slate-50">
+          <div className="bg-white px-4 py-6 border-b border-gray-100">
+            <h1 className="text-2xl font-bold text-gray-900">Admin Cockpit</h1>
+            <p className="text-sm text-gray-500">Access is restricted to super admin accounts.</p>
+          </div>
+          <div className="px-4 py-6 space-y-4">
+            <div className="rounded-3xl border border-amber-200 bg-amber-50 p-6 text-sm text-amber-800">
+              You do not have super admin access for this account.
             </div>
             <button
-              onClick={refreshAdmin}
-              className="rounded-full border border-gray-300 px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+              onClick={() => {
+                setAdminLoginRequested(false);
+                setView('dashboard');
+              }}
+              className="rounded-full border border-gray-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
             >
-              Refresh
+              Back To Workspace
             </button>
           </div>
         </div>
+      );
+    }
 
-        <div className="px-4 py-6 space-y-4">
+    const adminCurrencyCode = adminPaymentDraft?.currencyCode ?? adminPaymentSettings?.currencyCode ?? 'GHS';
+    const userTotalForTier = Math.max(adminAnalytics?.users.total ?? 0, 1);
+    const businessTotalForLocation = Math.max(adminAnalytics?.businesses.total ?? 0, 1);
+    const topLocations = (adminAnalytics?.locations ?? []).slice(0, 8);
+    const topBusinessTypes = (adminAnalytics?.businessTypes ?? []).slice(0, 8);
+    const recentActivity = adminAnalytics?.activity.recent ?? [];
+
+    return (
+      <div className="min-h-screen bg-slate-50">
+        <div className="border-b border-gray-200 bg-white px-4 py-6">
+          <div className="mx-auto flex w-full max-w-7xl items-center justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-blue-600">Control Room</p>
+              <h1 className="text-2xl font-bold text-gray-900">Super Admin Cockpit</h1>
+              <p className="text-sm text-gray-500">Global visibility across tiers, locations, operations, and billing signals.</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setView('dashboard')}
+                className="rounded-full border border-gray-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+              >
+                Open Workspace
+              </button>
+              <button
+                onClick={refreshAdmin}
+                className="rounded-full border border-gray-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+              >
+                Refresh
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="mx-auto w-full max-w-7xl px-4 py-6 space-y-6">
           {adminError && (
             <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
               {adminError}
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <div className="rounded-2xl bg-white p-4 shadow-sm">
               <p className="text-xs uppercase tracking-wide text-gray-500">Total users</p>
               <p className="mt-2 text-2xl font-bold text-gray-900">{adminAnalytics?.users.total ?? '-'}</p>
             </div>
             <div className="rounded-2xl bg-white p-4 shadow-sm">
-              <p className="text-xs uppercase tracking-wide text-gray-500">Subscribed users</p>
-              <p className="mt-2 text-2xl font-bold text-gray-900">{adminAnalytics?.users.subscribed ?? '-'}</p>
+              <p className="text-xs uppercase tracking-wide text-gray-500">Total workspaces</p>
+              <p className="mt-2 text-2xl font-bold text-gray-900">{adminAnalytics?.businesses.total ?? '-'}</p>
             </div>
             <div className="rounded-2xl bg-white p-4 shadow-sm">
               <p className="text-xs uppercase tracking-wide text-gray-500">Paid users</p>
               <p className="mt-2 text-2xl font-bold text-gray-900">{adminAnalytics?.users.paid ?? '-'}</p>
             </div>
             <div className="rounded-2xl bg-white p-4 shadow-sm">
-              <p className="text-xs uppercase tracking-wide text-gray-500">Free users</p>
-              <p className="mt-2 text-2xl font-bold text-gray-900">{adminAnalytics?.users.free ?? '-'}</p>
+              <p className="text-xs uppercase tracking-wide text-gray-500">Net (last 30 days)</p>
+              <p className="mt-2 text-2xl font-bold text-gray-900">
+                {formatCurrencyValue(adminAnalytics?.activity.last30Days.net ?? 0, adminCurrencyCode)}
+              </p>
             </div>
           </div>
 
-          <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
-            <h2 className="text-lg font-semibold text-gray-900">Daily subscriptions (last 14 days)</h2>
-            <p className="mt-1 text-sm text-gray-500">Successful paid subscriptions and estimated revenue per day.</p>
-            <div className="mt-4 grid grid-cols-2 gap-3">
-              <div className="rounded-2xl bg-gray-50 px-4 py-3">
-                <p className="text-xs uppercase tracking-wide text-gray-500">Total subscriptions</p>
-                <p className="mt-1 text-xl font-bold text-gray-900">
-                  {adminAnalytics?.subscriptions.daily.reduce((sum, day) => sum + day.count, 0) ?? 0}
-                </p>
+          <div className="grid gap-6 lg:grid-cols-3">
+            <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm lg:col-span-2">
+              <h2 className="text-lg font-semibold text-gray-900">Daily subscriptions (last 14 days)</h2>
+              <p className="mt-1 text-sm text-gray-500">Successful paid subscriptions and estimated revenue per day.</p>
+              <div className="mt-4 grid grid-cols-2 gap-3">
+                <div className="rounded-2xl bg-gray-50 px-4 py-3">
+                  <p className="text-xs uppercase tracking-wide text-gray-500">Total subscriptions</p>
+                  <p className="mt-1 text-xl font-bold text-gray-900">
+                    {adminAnalytics?.subscriptions.daily.reduce((sum, day) => sum + day.count, 0) ?? 0}
+                  </p>
+                </div>
+                <div className="rounded-2xl bg-gray-50 px-4 py-3">
+                  <p className="text-xs uppercase tracking-wide text-gray-500">Revenue</p>
+                  <p className="mt-1 text-xl font-bold text-gray-900">
+                    {formatCurrencyValue(
+                      adminAnalytics?.subscriptions.daily.reduce((sum, day) => sum + day.revenue, 0) ?? 0,
+                      adminCurrencyCode
+                    )}
+                  </p>
+                </div>
               </div>
-              <div className="rounded-2xl bg-gray-50 px-4 py-3">
-                <p className="text-xs uppercase tracking-wide text-gray-500">Revenue</p>
-                <p className="mt-1 text-xl font-bold text-gray-900">
-                  {formatCurrencyValue(
-                    adminAnalytics?.subscriptions.daily.reduce((sum, day) => sum + day.revenue, 0) ?? 0,
-                    adminPaymentDraft?.currencyCode ?? 'GHS'
-                  )}
-                </p>
-              </div>
+              {adminAnalytics?.subscriptions.daily.length ? (
+                <div className="mt-4 space-y-2">
+                  {adminAnalytics.subscriptions.daily.map((day) => {
+                    const peak = Math.max(...adminAnalytics.subscriptions.daily.map((entry) => entry.count), 1);
+                    const width = day.count > 0 ? Math.max(8, (day.count / peak) * 100) : 0;
+                    return (
+                      <div key={day.date}>
+                        <div className="mb-1 flex items-center justify-between text-xs text-gray-600">
+                          <span>{new Date(`${day.date}T12:00:00Z`).toLocaleDateString('en-GH', { month: 'short', day: 'numeric' })}</span>
+                          <span>{day.count} subs • {formatCurrencyValue(day.revenue, adminCurrencyCode)}</span>
+                        </div>
+                        <div className="h-2 overflow-hidden rounded-full bg-gray-100">
+                          <div className="h-full rounded-full bg-green-500" style={{ width: `${width}%` }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="mt-3 text-sm text-gray-500">No subscription trend data yet.</p>
+              )}
             </div>
-            {adminAnalytics?.subscriptions.daily.length ? (
-              <div className="mt-4 space-y-2">
-                {adminAnalytics.subscriptions.daily.map((day) => {
-                  const peak = Math.max(...adminAnalytics.subscriptions.daily.map((entry) => entry.count), 1);
-                  const width = day.count > 0 ? Math.max(8, (day.count / peak) * 100) : 0;
+
+            <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+              <h2 className="text-lg font-semibold text-gray-900">Price Tier Mix</h2>
+              <p className="mt-1 text-sm text-gray-500">User distribution by active plan tier.</p>
+              <div className="mt-4 space-y-3">
+                {[
+                  { label: 'Free', value: adminAnalytics?.tiers.free ?? 0, color: 'bg-gray-500' },
+                  { label: 'Trial', value: adminAnalytics?.tiers.trial ?? 0, color: 'bg-amber-500' },
+                  { label: 'Basic', value: adminAnalytics?.tiers.basic ?? 0, color: 'bg-blue-500' },
+                  { label: 'Premium', value: adminAnalytics?.tiers.premium ?? 0, color: 'bg-green-500' }
+                ].map((row) => {
+                  const width = Math.max(3, (row.value / userTotalForTier) * 100);
                   return (
-                    <div key={day.date}>
-                      <div className="mb-1 flex items-center justify-between text-xs text-gray-600">
-                        <span>{new Date(`${day.date}T12:00:00Z`).toLocaleDateString('en-GH', { month: 'short', day: 'numeric' })}</span>
-                        <span>{day.count} subs • {formatCurrencyValue(day.revenue, adminPaymentDraft?.currencyCode ?? 'GHS')}</span>
+                    <div key={row.label}>
+                      <div className="mb-1 flex items-center justify-between text-xs">
+                        <span className="font-semibold text-gray-700">{row.label}</span>
+                        <span className="text-gray-500">{row.value}</span>
                       </div>
                       <div className="h-2 overflow-hidden rounded-full bg-gray-100">
-                        <div className="h-full rounded-full bg-green-500" style={{ width: `${width}%` }} />
+                        <div className={`h-full rounded-full ${row.color}`} style={{ width: `${width}%` }} />
                       </div>
                     </div>
                   );
                 })}
               </div>
+            </div>
+          </div>
+
+          <div className="grid gap-6 lg:grid-cols-3">
+            <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+              <h2 className="text-lg font-semibold text-gray-900">Workspace Locations</h2>
+              <p className="mt-1 text-sm text-gray-500">Distribution by configured timezone/location.</p>
+              {topLocations.length ? (
+                <div className="mt-4 space-y-3">
+                  {topLocations.map((entry) => {
+                    const width = Math.max(3, (entry.count / businessTotalForLocation) * 100);
+                    return (
+                      <div key={entry.location}>
+                        <div className="mb-1 flex items-center justify-between text-xs">
+                          <span className="font-semibold text-gray-700">{entry.location}</span>
+                          <span className="text-gray-500">{entry.count}</span>
+                        </div>
+                        <div className="h-2 overflow-hidden rounded-full bg-gray-100">
+                          <div className="h-full rounded-full bg-sky-500" style={{ width: `${width}%` }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="mt-3 text-sm text-gray-500">No location signals yet.</p>
+              )}
+            </div>
+
+            <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+              <h2 className="text-lg font-semibold text-gray-900">Channel Activity (30d)</h2>
+              <p className="mt-1 text-sm text-gray-500">Where accounting events are being captured.</p>
+              <div className="mt-4 space-y-3">
+                {[
+                  { label: 'App', value: adminAnalytics?.channels.app ?? 0, color: 'bg-indigo-500' },
+                  { label: 'WhatsApp', value: adminAnalytics?.channels.whatsapp ?? 0, color: 'bg-green-500' },
+                  { label: 'System', value: adminAnalytics?.channels.system ?? 0, color: 'bg-gray-500' }
+                ].map((channel) => {
+                  const totalChannels = Math.max(
+                    (adminAnalytics?.channels.app ?? 0)
+                    + (adminAnalytics?.channels.whatsapp ?? 0)
+                    + (adminAnalytics?.channels.system ?? 0),
+                    1
+                  );
+                  const width = Math.max(3, (channel.value / totalChannels) * 100);
+                  return (
+                    <div key={channel.label}>
+                      <div className="mb-1 flex items-center justify-between text-xs">
+                        <span className="font-semibold text-gray-700">{channel.label}</span>
+                        <span className="text-gray-500">{channel.value}</span>
+                      </div>
+                      <div className="h-2 overflow-hidden rounded-full bg-gray-100">
+                        <div className={`h-full rounded-full ${channel.color}`} style={{ width: `${width}%` }} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="mt-4 grid grid-cols-2 gap-2 rounded-2xl bg-gray-50 p-3 text-xs">
+                <div>
+                  <p className="text-gray-500">Transactions (30d)</p>
+                  <p className="font-semibold text-gray-900">{adminAnalytics?.activity.last30Days.transactions ?? 0}</p>
+                </div>
+                <div>
+                  <p className="text-gray-500">Net (30d)</p>
+                  <p className="font-semibold text-gray-900">
+                    {formatCurrencyValue(adminAnalytics?.activity.last30Days.net ?? 0, adminCurrencyCode)}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+              <h2 className="text-lg font-semibold text-gray-900">Business Type Mix</h2>
+              <p className="mt-1 text-sm text-gray-500">Top business categories using Akonta AI.</p>
+              {topBusinessTypes.length ? (
+                <div className="mt-4 space-y-3">
+                  {topBusinessTypes.map((entry) => {
+                    const percentage = (entry.count / userTotalForTier) * 100;
+                    return (
+                      <div key={entry.type}>
+                        <div className="mb-1 flex items-center justify-between text-xs">
+                          <span className="font-semibold text-gray-700">{entry.type}</span>
+                          <span className="text-gray-500">{entry.count}</span>
+                        </div>
+                        <div className="h-2 overflow-hidden rounded-full bg-gray-100">
+                          <div className="h-full rounded-full bg-violet-500" style={{ width: `${Math.max(3, percentage)}%` }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="mt-3 text-sm text-gray-500">No business profile data yet.</p>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+            <h2 className="text-lg font-semibold text-gray-900">Recent Activity Feed</h2>
+            <p className="mt-1 text-sm text-gray-500">Latest events across all workspaces.</p>
+            {recentActivity.length ? (
+              <div className="mt-4 space-y-3">
+                {recentActivity.slice(0, 20).map((item) => (
+                  <div key={item.id} className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="font-semibold capitalize text-gray-900">{item.title}</p>
+                      <span className="text-xs text-gray-500">
+                        {formatDate(item.occurredAt)} {formatTime(item.occurredAt)}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs text-gray-600">{item.description}</p>
+                    <p className="mt-1 text-xs text-gray-500">
+                      {item.businessName} • {item.actorName}
+                    </p>
+                  </div>
+                ))}
+              </div>
             ) : (
-              <p className="mt-3 text-sm text-gray-500">No subscription trend data yet.</p>
+              <p className="mt-3 text-sm text-gray-500">No activity events yet.</p>
             )}
           </div>
 
@@ -3301,7 +3623,8 @@ export default function App() {
                       paystackPublicKey: event.target.value,
                       paystackSecretKey: prev?.paystackSecretKey ?? '',
                       paystackWebhookSecret: prev?.paystackWebhookSecret ?? '',
-                      premiumAmount: prev?.premiumAmount ?? 50,
+                      basicAmount: prev?.basicAmount ?? 60,
+                      premiumAmount: prev?.premiumAmount ?? 200,
                       currencyCode: prev?.currencyCode ?? 'GHS'
                     }))
                   }
@@ -3318,7 +3641,8 @@ export default function App() {
                       paystackPublicKey: prev?.paystackPublicKey ?? '',
                       paystackSecretKey: event.target.value,
                       paystackWebhookSecret: prev?.paystackWebhookSecret ?? '',
-                      premiumAmount: prev?.premiumAmount ?? 50,
+                      basicAmount: prev?.basicAmount ?? 60,
+                      premiumAmount: prev?.premiumAmount ?? 200,
                       currencyCode: prev?.currencyCode ?? 'GHS'
                     }))
                   }
@@ -3335,7 +3659,8 @@ export default function App() {
                       paystackPublicKey: prev?.paystackPublicKey ?? '',
                       paystackSecretKey: prev?.paystackSecretKey ?? '',
                       paystackWebhookSecret: event.target.value,
-                      premiumAmount: prev?.premiumAmount ?? 50,
+                      basicAmount: prev?.basicAmount ?? 60,
+                      premiumAmount: prev?.premiumAmount ?? 200,
                       currencyCode: prev?.currencyCode ?? 'GHS'
                     }))
                   }
@@ -3352,7 +3677,8 @@ export default function App() {
                       paystackPublicKey: prev?.paystackPublicKey ?? '',
                       paystackSecretKey: prev?.paystackSecretKey ?? '',
                       paystackWebhookSecret: prev?.paystackWebhookSecret ?? '',
-                      premiumAmount: prev?.premiumAmount ?? 50,
+                      basicAmount: prev?.basicAmount ?? 60,
+                      premiumAmount: prev?.premiumAmount ?? 200,
                       currencyCode: event.target.value.toUpperCase()
                     }))
                   }
@@ -3361,28 +3687,51 @@ export default function App() {
                 />
               </label>
             </div>
-            <label className="mt-3 block space-y-1">
-              <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Premium amount (major unit)</span>
-              <input
-                type="number"
-                min="1"
-                value={adminPaymentDraft?.premiumAmount ?? 50}
-                onChange={(event) =>
-                  setAdminPaymentDraft((prev) => ({
-                    paystackPublicKey: prev?.paystackPublicKey ?? '',
-                    paystackSecretKey: prev?.paystackSecretKey ?? '',
-                    paystackWebhookSecret: prev?.paystackWebhookSecret ?? '',
-                    premiumAmount: Number(event.target.value || 50),
-                    currencyCode: prev?.currencyCode ?? 'GHS'
-                  }))
-                }
-                className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700"
-              />
-            </label>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <label className="space-y-1">
+                <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Basic amount (major unit)</span>
+                <input
+                  type="number"
+                  min="1"
+                  value={adminPaymentDraft?.basicAmount ?? 60}
+                  onChange={(event) =>
+                    setAdminPaymentDraft((prev) => ({
+                      paystackPublicKey: prev?.paystackPublicKey ?? '',
+                      paystackSecretKey: prev?.paystackSecretKey ?? '',
+                      paystackWebhookSecret: prev?.paystackWebhookSecret ?? '',
+                      basicAmount: Number(event.target.value || 60),
+                      premiumAmount: prev?.premiumAmount ?? 200,
+                      currencyCode: prev?.currencyCode ?? 'GHS'
+                    }))
+                  }
+                  className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Premium amount (major unit)</span>
+                <input
+                  type="number"
+                  min="1"
+                  value={adminPaymentDraft?.premiumAmount ?? 200}
+                  onChange={(event) =>
+                    setAdminPaymentDraft((prev) => ({
+                      paystackPublicKey: prev?.paystackPublicKey ?? '',
+                      paystackSecretKey: prev?.paystackSecretKey ?? '',
+                      paystackWebhookSecret: prev?.paystackWebhookSecret ?? '',
+                      basicAmount: prev?.basicAmount ?? 60,
+                      premiumAmount: Number(event.target.value || 200),
+                      currencyCode: prev?.currencyCode ?? 'GHS'
+                    }))
+                  }
+                  className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700"
+                />
+              </label>
+            </div>
             {adminPaymentSettings && (
-              <p className="mt-3 text-xs text-gray-500">
-                Current live price: {formatCurrencyValue(adminPaymentSettings.premiumAmount, adminPaymentSettings.currencyCode)} / month
-              </p>
+              <div className="mt-3 space-y-1 text-xs text-gray-500">
+                <p>Current live Basic: {formatCurrencyValue(adminPaymentSettings.basicAmount, adminPaymentSettings.currencyCode)} / month</p>
+                <p>Current live Premium: {formatCurrencyValue(adminPaymentSettings.premiumAmount, adminPaymentSettings.currencyCode)} / month</p>
+              </div>
             )}
             <button
               onClick={handleSavePaymentConfig}
@@ -3437,8 +3786,6 @@ export default function App() {
             </div>
           </div>
         </div>
-
-        <BottomNav />
       </div>
     );
   }
@@ -3456,6 +3803,9 @@ export default function App() {
       viewer: 'Viewer',
       accountant: 'Accountant'
     };
+    const basicMonthlyPrice = adminPaymentSettings?.basicAmount ?? adminPaymentDraft?.basicAmount ?? 60;
+    const premiumMonthlyPrice = adminPaymentSettings?.premiumAmount ?? adminPaymentDraft?.premiumAmount ?? 200;
+    const billingCurrencyCode = adminPaymentSettings?.currencyCode ?? adminPaymentDraft?.currencyCode ?? 'GHS';
 
     const handleSaveBudget = async () => {
       if (!user || !budgetAmount) return;
@@ -3504,7 +3854,47 @@ export default function App() {
       }
     };
 
-    const handleStartPremiumCheckout = async () => {
+    const telegramLinkCommand = user?.phoneNumber ? `/link ${user.phoneNumber}` : '/link +233XXXXXXXXX';
+    const isTelegramLinked = Boolean(telegramStatus?.telegramChatId);
+
+    const handleCopyTelegramLinkCommand = async () => {
+      setError(null);
+      setSettingsNotice(null);
+      setTeamNotice(null);
+      if (!navigator?.clipboard) {
+        setError('Clipboard is unavailable in this browser.');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(telegramLinkCommand);
+        setSettingsNotice('Telegram link command copied.');
+      } catch (copyError) {
+        console.error('Unable to copy Telegram link command', copyError);
+        setError('Unable to copy Telegram link command.');
+      }
+    };
+
+    const handleRefreshTelegramLinkStatus = async () => {
+      if (!user) return;
+      setError(null);
+      setSettingsNotice(null);
+      setTeamNotice(null);
+      try {
+        const latestUser = await getUser(user.id);
+        setUser(latestUser);
+        await telegramStatusQuery.refetch();
+        setSettingsNotice(
+          latestUser.telegramChatId
+            ? 'Telegram linked and ready for this account.'
+            : 'Telegram is not linked yet. Use the /link command in Telegram.'
+        );
+      } catch (refreshError) {
+        console.error('Unable to refresh Telegram status', refreshError);
+        setError('Unable to refresh Telegram status right now.');
+      }
+    };
+
+    const handleStartCheckout = async (plan: 'basic' | 'premium') => {
       if (!user) return;
       setError(null);
       setSettingsNotice(null);
@@ -3513,6 +3903,7 @@ export default function App() {
         const callbackUrl = `${window.location.origin}${window.location.pathname}`;
         const initialized = await initializeSubscriptionMutation.mutateAsync({
           userId: user.id,
+          plan,
           months: 1,
           callbackUrl
         });
@@ -3523,7 +3914,7 @@ export default function App() {
       }
     };
 
-    const handleManualPremiumActivation = async () => {
+    const handleManualPlanActivation = async (status: 'basic' | 'premium') => {
       if (!user) return;
       setError(null);
       setSettingsNotice(null);
@@ -3532,15 +3923,15 @@ export default function App() {
         const updated = await activateSubscriptionMutation.mutateAsync({
           userId: user.id,
           request: {
-            status: 'premium',
+            status,
             source: 'paid',
             months: 1,
-            note: 'Manual premium activation'
+            note: `Manual ${status} activation`
           }
         });
         setUser(updated);
         await referralProgressQuery.refetch();
-        setSettingsNotice('Premium manually activated for this account.');
+        setSettingsNotice(`${status === 'premium' ? 'Premium' : 'Basic'} manually activated for this account.`);
       } catch (subscriptionError) {
         console.error('Unable to activate subscription', subscriptionError);
         setError('Unable to activate subscription.');
@@ -3576,7 +3967,7 @@ export default function App() {
         setTeamNotice(`${normalizedName} invited as ${roleLabel[teamInviteRole]}.`);
       } catch (inviteError) {
         console.error('Unable to invite workspace member', inviteError);
-        setError('Unable to invite this team member right now.');
+        setError(inviteError instanceof Error ? inviteError.message : 'Unable to invite this team member right now.');
       }
     };
 
@@ -3597,7 +3988,7 @@ export default function App() {
         setTeamNotice(`Updated ${member.user.fullName ?? member.user.name} to ${roleLabel[nextRole]}.`);
       } catch (roleError) {
         console.error('Unable to update member role', roleError);
-        setError('Unable to update member role right now.');
+        setError(roleError instanceof Error ? roleError.message : 'Unable to update member role right now.');
       }
     };
 
@@ -3619,7 +4010,7 @@ export default function App() {
         );
       } catch (statusError) {
         console.error('Unable to update member status', statusError);
-        setError('Unable to update member status right now.');
+        setError(statusError instanceof Error ? statusError.message : 'Unable to update member status right now.');
       }
     };
 
@@ -3745,6 +4136,18 @@ export default function App() {
                   {inviteWorkspaceMemberMutation.isPending ? 'Sending invite...' : 'Invite Team Member'}
                 </button>
               </div>
+            ) : activeWorkspaceMembership?.role === 'owner' ? (
+              <div className="mb-5 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                <p className="font-semibold">Premium is required for multi-user workspace access.</p>
+                <p className="mt-1">Upgrade to Premium to invite and manage team members.</p>
+                <button
+                  onClick={() => void handleStartCheckout('premium')}
+                  disabled={isAnySettingsActionPending}
+                  className="mt-3 rounded-full bg-amber-500 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-600 disabled:opacity-50"
+                >
+                  {isStartingCheckout ? 'Redirecting...' : `Upgrade to Premium (${formatCurrencyValue(premiumMonthlyPrice, billingCurrencyCode)}/mo)`}
+                </button>
+              </div>
             ) : (
               <p className="mb-5 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
                 Only workspace owners can invite or edit team members.
@@ -3814,6 +4217,79 @@ export default function App() {
           </div>
 
           <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">Messaging Channels</h2>
+                <p className="text-sm text-gray-500">Use both WhatsApp and Telegram for the same business account.</p>
+              </div>
+              <button
+                onClick={handleRefreshTelegramLinkStatus}
+                disabled={telegramStatusQuery.isFetching}
+                className="rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                {telegramStatusQuery.isFetching ? 'Refreshing...' : 'Refresh Status'}
+              </button>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3">
+                <p className="text-xs uppercase tracking-wide text-gray-500">Web Chat</p>
+                <p className="mt-2 text-sm font-semibold text-green-700">Active</p>
+              </div>
+              <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3">
+                <p className="text-xs uppercase tracking-wide text-gray-500">WhatsApp</p>
+                <p className={`mt-2 text-sm font-semibold ${hasPaidChannelAccess ? 'text-green-700' : 'text-amber-700'}`}>
+                  {hasPaidChannelAccess ? 'Active on your plan' : 'Paid plans only (Basic/Premium)'}
+                </p>
+              </div>
+              <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3">
+                <p className="text-xs uppercase tracking-wide text-gray-500">Telegram</p>
+                <p className={`mt-2 text-sm font-semibold ${isTelegramLinked ? 'text-green-700' : 'text-gray-700'}`}>
+                  {isTelegramLinked ? 'Linked and active' : 'Not linked yet'}
+                </p>
+                {telegramStatus?.telegramUsername && (
+                  <p className="mt-1 text-xs text-gray-500">@{telegramStatus.telegramUsername}</p>
+                )}
+              </div>
+            </div>
+
+            {!telegramStatus?.enabled && (
+              <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                Telegram bot is not configured on this environment yet. Set TELEGRAM_BOT_TOKEN on backend first.
+              </div>
+            )}
+
+            <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 px-4 py-4">
+              <p className="text-sm font-semibold text-gray-900">Link Telegram to this account</p>
+              <p className="mt-1 text-sm text-gray-600">
+                In Telegram, start the Akonta bot and send the command below once:
+              </p>
+              <div className="mt-3 rounded-xl bg-gray-900 px-3 py-2 text-sm font-mono text-green-300">
+                {telegramLinkCommand}
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  onClick={handleCopyTelegramLinkCommand}
+                  className="rounded-full bg-green-600 px-4 py-2 text-xs font-semibold text-white hover:bg-green-700"
+                >
+                  Copy /link Command
+                </button>
+                <button
+                  onClick={handleRefreshTelegramLinkStatus}
+                  disabled={telegramStatusQuery.isFetching}
+                  className="rounded-full border border-gray-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+                >
+                  Check Link Again
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+              You can use both channels for one business. Each channel has its own chat thread, but all confirmed records go to the same workspace books.
+            </div>
+          </div>
+
+          <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Currency preference</h2>
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
@@ -3846,7 +4322,7 @@ export default function App() {
             <div className="mb-4 flex items-start justify-between gap-4">
               <div>
                 <h2 className="text-lg font-semibold text-gray-900">Referral rewards</h2>
-                <p className="text-sm text-gray-500">Every 3 referral signups unlocks 1 extra month of premium access.</p>
+                <p className="text-sm text-gray-500">Every 3 referral signups unlocks 1 extra month of Basic access.</p>
               </div>
               <button
                 onClick={refreshReferralData}
@@ -3883,15 +4359,22 @@ export default function App() {
                   Copy Link
                 </button>
                 <button
-                  onClick={handleStartPremiumCheckout}
+                  onClick={() => void handleStartCheckout('basic')}
                   disabled={isAnySettingsActionPending}
                   className="rounded-full bg-amber-500 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-600 disabled:opacity-50"
                 >
-                  {isStartingCheckout ? 'Redirecting...' : 'Subscribe Now (MoMo/Card)'}
+                  {isStartingCheckout ? 'Redirecting...' : `Start Basic (${formatCurrencyValue(basicMonthlyPrice, billingCurrencyCode)}/mo)`}
+                </button>
+                <button
+                  onClick={() => void handleStartCheckout('premium')}
+                  disabled={isAnySettingsActionPending}
+                  className="rounded-full bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {isStartingCheckout ? 'Redirecting...' : `Upgrade Premium (${formatCurrencyValue(premiumMonthlyPrice, billingCurrencyCode)}/mo)`}
                 </button>
                 {user?.isSuperAdmin && (
                   <button
-                    onClick={handleManualPremiumActivation}
+                    onClick={() => void handleManualPlanActivation('premium')}
                     disabled={isAnySettingsActionPending}
                     className="rounded-full border border-gray-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50"
                   >
@@ -3899,6 +4382,9 @@ export default function App() {
                   </button>
                 )}
               </div>
+              <p className="mt-2 text-xs text-gray-500">
+                {planEquivalentLabel.basic} · {planEquivalentLabel.premium}
+              </p>
               {referralCopyMessage && <p className="mt-2 text-xs text-green-700">{referralCopyMessage}</p>}
             </div>
           </div>

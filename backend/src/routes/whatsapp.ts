@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { Prisma } from '@prisma/client';
 import crypto from 'node:crypto';
 import db from '../lib/db.js';
+import { isPaidSubscriptionStatus } from '../lib/subscriptionAccess.js';
 import { processConversationMessage } from '../services/conversation.js';
 import { availableProviders, getConfiguredProvider, resolveProvider, sendWhatsAppMessage } from '../services/whatsapp.js';
 import {
@@ -140,6 +141,26 @@ const whatsappRoutes: FastifyPluginAsync = async (fastify) => {
       };
     }
 
+    if (!isPaidSubscriptionStatus(business.subscriptionStatus)) {
+      await db.processedWebhookEvent.update({
+        where: { id: reservation.id },
+        data: {
+          userId: business.primaryWhatsappUserId,
+          businessId: business.id,
+          payload: params.payload as Prisma.InputJsonValue
+        }
+      });
+      return {
+        success: true,
+        skipped: true,
+        reason: 'WhatsApp channel is available on paid plans only (Basic or Premium).',
+        provider: params.provider,
+        eventId: params.eventId,
+        userId: business.primaryWhatsappUserId,
+        businessId: business.id
+      };
+    }
+
     try {
       const result = await processConversationMessage({
         userId: business.primaryWhatsappUserId,
@@ -216,6 +237,7 @@ const whatsappRoutes: FastifyPluginAsync = async (fastify) => {
       message?: string;
       eventId?: string;
       provider?: 'generic' | 'twilio' | 'infobip';
+      businessId?: string;
     };
 
     if (!body.userId || !body.message) {
@@ -241,8 +263,48 @@ const whatsappRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     try {
+      const userWithBusiness = await db.user.findUnique({
+        where: { id: body.userId },
+        select: {
+          subscriptionStatus: true,
+          activeBusinessId: true,
+          activeBusiness: {
+            select: {
+              id: true,
+              subscriptionStatus: true
+            }
+          }
+        }
+      });
+
+      const effectiveBusinessId = body.businessId ?? userWithBusiness?.activeBusinessId ?? undefined;
+      const activeBusinessStatus = userWithBusiness?.activeBusiness?.subscriptionStatus;
+      const effectiveStatus = userWithBusiness?.activeBusiness?.id === effectiveBusinessId
+        ? activeBusinessStatus
+        : userWithBusiness?.subscriptionStatus;
+
+      if (!isPaidSubscriptionStatus(effectiveStatus)) {
+        await db.processedWebhookEvent.update({
+          where: { id: reservation.id },
+          data: {
+            userId: body.userId,
+            businessId: effectiveBusinessId ?? null,
+            payload: body as Prisma.InputJsonValue
+          }
+        });
+
+        return {
+          success: true,
+          skipped: true,
+          provider,
+          eventId,
+          reason: 'WhatsApp channel is available on paid plans only (Basic or Premium).'
+        };
+      }
+
       const result = await processConversationMessage({
         userId: body.userId,
+        businessId: effectiveBusinessId,
         message: body.message,
         channel: 'whatsapp'
       });
@@ -251,6 +313,7 @@ const whatsappRoutes: FastifyPluginAsync = async (fastify) => {
         where: { id: reservation.id },
         data: {
           userId: body.userId,
+          businessId: effectiveBusinessId ?? null,
           payload: body as Prisma.InputJsonValue
         }
       });

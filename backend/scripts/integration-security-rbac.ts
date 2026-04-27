@@ -132,6 +132,18 @@ const main = async () => {
   const ownerA = await loginByOtp(ownerAPhone);
   const ownerB = await loginByOtp(ownerBPhone);
 
+  const ownerAPremium = await request<{ id: string; subscriptionStatus: string }>({
+    method: 'POST',
+    path: `/api/users/${encodeURIComponent(ownerA.user.id)}/subscription`,
+    body: {
+      status: 'premium',
+      source: 'paid',
+      months: 1,
+      note: 'Security test premium workspace setup'
+    }
+  });
+  assert.equal(ownerAPremium.status, 200, 'owner A premium activation should succeed');
+
   const unauth = await request<{ message: string }>({
     method: 'GET',
     path: '/api/workspaces'

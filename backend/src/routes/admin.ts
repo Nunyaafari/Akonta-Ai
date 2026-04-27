@@ -29,8 +29,15 @@ const adminRoutes: FastifyPluginAsync = async (fastify) => {
     const [
       totalUsers,
       freeUsers,
+      basicUsers,
       trialUsers,
-      paidUsers,
+      premiumUsers,
+      totalBusinesses,
+      freeBusinesses,
+      basicBusinesses,
+      trialBusinesses,
+      premiumBusinesses,
+      businessLocationGroups,
       businessTypes,
       subscriptionStarts,
       referralConversions,
@@ -38,8 +45,18 @@ const adminRoutes: FastifyPluginAsync = async (fastify) => {
     ] = await Promise.all([
       db.user.count(),
       db.user.count({ where: { subscriptionStatus: 'free' } }),
+      db.user.count({ where: { subscriptionStatus: 'basic' } }),
       db.user.count({ where: { subscriptionStatus: 'trial' } }),
       db.user.count({ where: { subscriptionStatus: 'premium' } }),
+      db.business.count(),
+      db.business.count({ where: { subscriptionStatus: 'free' } }),
+      db.business.count({ where: { subscriptionStatus: 'basic' } }),
+      db.business.count({ where: { subscriptionStatus: 'trial' } }),
+      db.business.count({ where: { subscriptionStatus: 'premium' } }),
+      db.business.groupBy({
+        by: ['timezone'],
+        _count: { _all: true }
+      }),
       db.user.groupBy({
         by: ['businessType'],
         _count: { _all: true }
@@ -57,8 +74,18 @@ const adminRoutes: FastifyPluginAsync = async (fastify) => {
     const now = new Date();
     const days = 14;
     const startDate = addDaysUtc(startOfUtcDay(now), -(days - 1));
+    const activityWindowStart = addDaysUtc(startOfUtcDay(now), -29);
 
-    const [dailyGrants, dailyPayments] = await Promise.all([
+    const [
+      dailyGrants,
+      dailyPayments,
+      recentAuditLogs,
+      recentTransactions,
+      recentSuccessfulPayments,
+      recentRevenueAggregate,
+      recentExpenseAggregate,
+      recentChannelMix
+    ] = await Promise.all([
       db.subscriptionGrant.findMany({
         where: {
           source: 'paid',
@@ -75,6 +102,87 @@ const adminRoutes: FastifyPluginAsync = async (fastify) => {
           createdAt: true,
           amountMinor: true
         }
+      }),
+      db.auditLog.findMany({
+        orderBy: { performedAt: 'desc' },
+        take: 30,
+        include: {
+          business: {
+            select: { businessName: true }
+          },
+          performedByUser: {
+            select: { name: true, fullName: true }
+          }
+        }
+      }),
+      db.transaction.findMany({
+        orderBy: { createdAt: 'desc' },
+        take: 30,
+        where: {
+          createdAt: { gte: activityWindowStart },
+          isDeleted: false
+        },
+        select: {
+          id: true,
+          type: true,
+          amount: true,
+          status: true,
+          createdAt: true,
+          business: {
+            select: { businessName: true }
+          },
+          createdByUser: {
+            select: { name: true, fullName: true }
+          }
+        }
+      }),
+      db.subscriptionPayment.findMany({
+        orderBy: { createdAt: 'desc' },
+        take: 30,
+        where: {
+          status: 'successful',
+          createdAt: { gte: activityWindowStart }
+        },
+        select: {
+          id: true,
+          amountMinor: true,
+          currencyCode: true,
+          createdAt: true,
+          business: {
+            select: { businessName: true }
+          },
+          user: {
+            select: { name: true, fullName: true }
+          }
+        }
+      }),
+      db.transaction.aggregate({
+        where: {
+          createdAt: { gte: activityWindowStart },
+          isDeleted: false,
+          status: 'confirmed',
+          type: 'revenue'
+        },
+        _count: { _all: true },
+        _sum: { amount: true }
+      }),
+      db.transaction.aggregate({
+        where: {
+          createdAt: { gte: activityWindowStart },
+          isDeleted: false,
+          status: 'confirmed',
+          type: 'expense'
+        },
+        _count: { _all: true },
+        _sum: { amount: true }
+      }),
+      db.transaction.groupBy({
+        by: ['sourceChannel'],
+        where: {
+          createdAt: { gte: activityWindowStart },
+          isDeleted: false
+        },
+        _count: { _all: true }
       })
     ]);
 
@@ -102,17 +210,89 @@ const adminRoutes: FastifyPluginAsync = async (fastify) => {
       };
     });
 
+    const recentActivity = [
+      ...recentAuditLogs.map((log) => ({
+        id: `audit-${log.id}`,
+        type: 'audit' as const,
+        title: log.action.replace(/_/g, ' '),
+        description: `${log.entityType} ${log.entityId}`,
+        businessName: log.business.businessName,
+        actorName: log.performedByUser?.fullName || log.performedByUser?.name || 'System',
+        occurredAt: log.performedAt.toISOString()
+      })),
+      ...recentTransactions.map((tx) => ({
+        id: `transaction-${tx.id}`,
+        type: 'transaction' as const,
+        title: tx.type === 'revenue' ? 'Revenue entry created' : 'Expense entry created',
+        description: `${tx.status} • ${tx.amount.toFixed(2)}`,
+        businessName: tx.business?.businessName ?? 'Unknown workspace',
+        actorName: tx.createdByUser.fullName || tx.createdByUser.name,
+        occurredAt: tx.createdAt.toISOString()
+      })),
+      ...recentSuccessfulPayments.map((payment) => ({
+        id: `subscription-${payment.id}`,
+        type: 'subscription' as const,
+        title: 'Subscription payment succeeded',
+        description: `${payment.currencyCode} ${(payment.amountMinor / 100).toFixed(2)}`,
+        businessName: payment.business?.businessName ?? 'Unknown workspace',
+        actorName: payment.user.fullName || payment.user.name,
+        occurredAt: payment.createdAt.toISOString()
+      }))
+    ]
+      .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
+      .slice(0, 40);
+
+    const revenueLast30 = recentRevenueAggregate._sum.amount ?? 0;
+    const expenseLast30 = recentExpenseAggregate._sum.amount ?? 0;
+    const transactionsLast30 = (recentRevenueAggregate._count._all ?? 0) + (recentExpenseAggregate._count._all ?? 0);
+    const channelCountMap = new Map(recentChannelMix.map((entry) => [entry.sourceChannel, entry._count._all]));
+
     return {
       users: {
         total: totalUsers,
-        subscribed: paidUsers + trialUsers,
-        paid: paidUsers,
+        subscribed: basicUsers + premiumUsers + trialUsers,
+        paid: basicUsers + premiumUsers,
+        basic: basicUsers,
+        premium: premiumUsers,
         trial: trialUsers,
         free: freeUsers
+      },
+      tiers: {
+        free: freeUsers,
+        basic: basicUsers,
+        premium: premiumUsers,
+        trial: trialUsers
+      },
+      businesses: {
+        total: totalBusinesses,
+        free: freeBusinesses,
+        basic: basicBusinesses,
+        premium: premiumBusinesses,
+        trial: trialBusinesses
       },
       subscriptions: {
         paidStarts: subscriptionStarts,
         daily
+      },
+      locations: businessLocationGroups
+        .map((row) => ({
+          location: row.timezone?.trim() || 'Unspecified',
+          count: row._count._all
+        }))
+        .sort((a, b) => b.count - a.count),
+      channels: {
+        app: channelCountMap.get('app') ?? 0,
+        whatsapp: channelCountMap.get('whatsapp') ?? 0,
+        system: channelCountMap.get('system') ?? 0
+      },
+      activity: {
+        last30Days: {
+          transactions: transactionsLast30,
+          revenue: revenueLast30,
+          expenses: expenseLast30,
+          net: revenueLast30 - expenseLast30
+        },
+        recent: recentActivity
       },
       referrals: {
         qualifiedConversions: referralConversions,
@@ -229,6 +409,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify) => {
       paystackPublicKey: settings.publicKey,
       paystackSecretKey: settings.secretKey,
       paystackWebhookSecret: settings.webhookSecret,
+      basicAmount: settings.basicAmountMajor,
       premiumAmount: settings.premiumAmountMajor,
       currencyCode: settings.currencyCode
     };
@@ -239,12 +420,25 @@ const adminRoutes: FastifyPluginAsync = async (fastify) => {
       paystackPublicKey?: string;
       paystackSecretKey?: string;
       paystackWebhookSecret?: string;
+      basicAmount?: number;
       premiumAmount?: number;
       currencyCode?: string;
     };
 
+    if (body.basicAmount !== undefined && (!Number.isFinite(body.basicAmount) || body.basicAmount < 1 || body.basicAmount > 100000)) {
+      return reply.status(400).send({ message: 'basicAmount must be between 1 and 100000.' });
+    }
+
     if (body.premiumAmount !== undefined && (!Number.isFinite(body.premiumAmount) || body.premiumAmount < 1 || body.premiumAmount > 100000)) {
       return reply.status(400).send({ message: 'premiumAmount must be between 1 and 100000.' });
+    }
+
+    if (
+      body.basicAmount !== undefined
+      && body.premiumAmount !== undefined
+      && Math.floor(body.premiumAmount) < Math.floor(body.basicAmount)
+    ) {
+      return reply.status(400).send({ message: 'premiumAmount must be greater than or equal to basicAmount.' });
     }
 
     if (body.currencyCode !== undefined && !normalizedCurrencyCode(body.currencyCode)) {
@@ -257,6 +451,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify) => {
         paystackPublicKey: body.paystackPublicKey !== undefined ? asTrimmedString(body.paystackPublicKey) || null : undefined,
         paystackSecretKey: body.paystackSecretKey !== undefined ? asTrimmedString(body.paystackSecretKey) || null : undefined,
         paystackWebhookSecret: body.paystackWebhookSecret !== undefined ? asTrimmedString(body.paystackWebhookSecret) || null : undefined,
+        paystackBasicAmount: body.basicAmount !== undefined ? Math.floor(body.basicAmount) : undefined,
         paystackPremiumAmount: body.premiumAmount !== undefined ? Math.floor(body.premiumAmount) : undefined,
         paystackCurrencyCode: body.currencyCode !== undefined ? normalizedCurrencyCode(body.currencyCode) ?? undefined : undefined
       },
@@ -266,13 +461,15 @@ const adminRoutes: FastifyPluginAsync = async (fastify) => {
         paystackPublicKey: body.paystackPublicKey ? asTrimmedString(body.paystackPublicKey) : null,
         paystackSecretKey: body.paystackSecretKey ? asTrimmedString(body.paystackSecretKey) : null,
         paystackWebhookSecret: body.paystackWebhookSecret ? asTrimmedString(body.paystackWebhookSecret) : null,
-        paystackPremiumAmount: body.premiumAmount !== undefined ? Math.floor(body.premiumAmount) : 50,
+        paystackBasicAmount: body.basicAmount !== undefined ? Math.floor(body.basicAmount) : 60,
+        paystackPremiumAmount: body.premiumAmount !== undefined ? Math.floor(body.premiumAmount) : 200,
         paystackCurrencyCode: normalizedCurrencyCode(body.currencyCode) ?? 'GHS'
       },
       select: {
         paystackPublicKey: true,
         paystackSecretKey: true,
         paystackWebhookSecret: true,
+        paystackBasicAmount: true,
         paystackPremiumAmount: true,
         paystackCurrencyCode: true
       }
@@ -282,6 +479,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify) => {
       paystackPublicKey: updated.paystackPublicKey,
       paystackSecretKey: updated.paystackSecretKey,
       paystackWebhookSecret: updated.paystackWebhookSecret,
+      basicAmount: updated.paystackBasicAmount,
       premiumAmount: updated.paystackPremiumAmount,
       currencyCode: updated.paystackCurrencyCode
     };

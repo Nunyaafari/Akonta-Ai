@@ -314,7 +314,8 @@ let mockPaystackSettings: AdminPaymentSettings = {
   paystackPublicKey: '',
   paystackSecretKey: '',
   paystackWebhookSecret: '',
-  premiumAmount: 50,
+  basicAmount: 60,
+  premiumAmount: 200,
   currencyCode: 'GHS'
 };
 
@@ -322,6 +323,7 @@ const subscriptionPayments: Array<{
   id: string;
   reference: string;
   userId: string;
+  plan: 'basic' | 'premium';
   amountMinor: number;
   currencyCode: string;
   status: 'pending' | 'successful' | 'failed';
@@ -386,7 +388,7 @@ const ensureReferralQualification = (userId: string) => {
         ? new Date(referrer.subscriptionEndsAt)
         : now;
       const anchor = baseEnd > now ? baseEnd : now;
-      referrer.subscriptionStatus = 'premium';
+      referrer.subscriptionStatus = 'basic';
       referrer.subscriptionEndsAt = addMonthsUtc(anchor, REFERRAL_REWARD_MONTHS);
       referrer.freeSubscriptionMonthsEarned = (referrer.freeSubscriptionMonthsEarned ?? 0) + REFERRAL_REWARD_MONTHS;
     }
@@ -449,7 +451,7 @@ export const mockUpdateUser = async (
 };
 
 export const mockActivateUserSubscription = async (id: string, payload: {
-  status?: 'free' | 'premium' | 'trial';
+  status?: 'free' | 'basic' | 'premium' | 'trial';
   months?: number;
   note?: string;
 }): Promise<User> => {
@@ -458,7 +460,7 @@ export const mockActivateUserSubscription = async (id: string, payload: {
 
   const nextStatus = payload.status ?? user.subscriptionStatus;
   user.subscriptionStatus = nextStatus;
-  if (nextStatus === 'premium') {
+  if (nextStatus === 'basic' || nextStatus === 'premium') {
     const now = new Date();
     const anchorBase = user.subscriptionEndsAt ? new Date(user.subscriptionEndsAt) : now;
     const anchor = anchorBase > now ? anchorBase : now;
@@ -2072,11 +2074,18 @@ export const mockGetReferralProgress = async (userId: string): Promise<ReferralP
 
 export const mockGetAdminAnalytics = async (): Promise<AdminAnalytics> => {
   const total = users.length;
-  const paid = users.filter((user) => user.subscriptionStatus === 'premium').length;
+  const basic = users.filter((user) => user.subscriptionStatus === 'basic').length;
+  const premium = users.filter((user) => user.subscriptionStatus === 'premium').length;
   const trial = users.filter((user) => user.subscriptionStatus === 'trial').length;
   const free = users.filter((user) => user.subscriptionStatus === 'free').length;
+  const totalBusinesses = users.length;
   const businessCounts = users.reduce<Record<string, number>>((acc, user) => {
     const key = user.businessType || 'Unspecified';
+    acc[key] = (acc[key] ?? 0) + 1;
+    return acc;
+  }, {});
+  const locationCounts = users.reduce<Record<string, number>>((acc, user) => {
+    const key = user.timezone || 'Unspecified';
     acc[key] = (acc[key] ?? 0) + 1;
     return acc;
   }, {});
@@ -2102,17 +2111,91 @@ export const mockGetAdminAnalytics = async (): Promise<AdminAnalytics> => {
     };
   });
 
+  const allTransactions = Object.values(transactionsByUser).flat();
+  const last30Start = new Date();
+  last30Start.setUTCDate(last30Start.getUTCDate() - 29);
+  const last30Transactions = allTransactions.filter((tx) => {
+    const createdAt = new Date(tx.createdAt);
+    return createdAt >= last30Start;
+  });
+  const revenueLast30 = last30Transactions
+    .filter((tx) => tx.type === 'revenue' && tx.status === 'confirmed')
+    .reduce((sum, tx) => sum + tx.amount, 0);
+  const expensesLast30 = last30Transactions
+    .filter((tx) => tx.type === 'expense' && tx.status === 'confirmed')
+    .reduce((sum, tx) => sum + tx.amount, 0);
+
+  const recentActivity = [
+    ...subscriptionPayments
+      .filter((payment) => payment.status === 'successful')
+      .map((payment) => {
+        const user = users.find((entry) => entry.id === payment.userId);
+        return {
+          id: `subscription-${payment.id}`,
+          type: 'subscription' as const,
+          title: 'Subscription payment succeeded',
+          description: `${payment.currencyCode} ${(payment.amountMinor / 100).toFixed(2)}`,
+          businessName: user?.businessName ?? 'Unknown workspace',
+          actorName: user?.name ?? 'Unknown user',
+          occurredAt: payment.createdAt
+        };
+      }),
+    ...last30Transactions.map((tx) => ({
+      id: `transaction-${tx.id}`,
+      type: 'transaction' as const,
+      title: tx.type === 'revenue' ? 'Revenue entry created' : 'Expense entry created',
+      description: `${tx.status ?? 'confirmed'} • ${tx.amount.toFixed(2)}`,
+      businessName: users.find((entry) => entry.id === tx.userId)?.businessName ?? 'Unknown workspace',
+      actorName: users.find((entry) => entry.id === tx.userId)?.name ?? 'Unknown user',
+      occurredAt: new Date(tx.createdAt).toISOString()
+    }))
+  ]
+    .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
+    .slice(0, 40);
+
   return {
     users: {
       total,
-      subscribed: paid + trial,
-      paid,
+      subscribed: basic + premium + trial,
+      paid: basic + premium,
+      basic,
+      premium,
       trial,
       free
+    },
+    tiers: {
+      free,
+      basic,
+      premium,
+      trial
+    },
+    businesses: {
+      total: totalBusinesses,
+      free,
+      basic,
+      premium,
+      trial
     },
     subscriptions: {
       paidStarts: subscriptionPayments.filter((payment) => payment.status === 'successful').length,
       daily
+    },
+    locations: Object.entries(locationCounts)
+      .map(([location, count]) => ({ location, count }))
+      .sort((a, b) => b.count - a.count),
+    channels: {
+      app: last30Transactions.length,
+      whatsapp: 0,
+      system: 0
+    },
+    activity: {
+      last30Days: {
+        transactions: last30Transactions.length,
+        revenue: revenueLast30,
+        expenses: expensesLast30,
+        net: revenueLast30 - expensesLast30
+      },
+      recent: recentActivity
     },
     referrals: {
       qualifiedConversions: conversions,
@@ -2167,6 +2250,9 @@ export const mockSetAdminPaymentSettings = async (
   mockPaystackSettings = {
     ...mockPaystackSettings,
     ...payload,
+    basicAmount: payload.basicAmount !== undefined
+      ? Math.max(1, Math.floor(payload.basicAmount))
+      : mockPaystackSettings.basicAmount,
     premiumAmount: payload.premiumAmount !== undefined
       ? Math.max(1, Math.floor(payload.premiumAmount))
       : mockPaystackSettings.premiumAmount,
@@ -2177,12 +2263,14 @@ export const mockSetAdminPaymentSettings = async (
 
 export const mockInitializeSubscriptionPayment = async (payload: {
   userId: string;
+  plan?: 'basic' | 'premium';
   months?: number;
   callbackUrl?: string;
   customerEmail?: string;
 }): Promise<SubscriptionPaymentInitialization> => {
   const months = parsePositiveInt(payload.months, 1);
-  const amountMajor = mockPaystackSettings.premiumAmount * months;
+  const plan = payload.plan === 'premium' ? 'premium' : 'basic';
+  const amountMajor = (plan === 'premium' ? mockPaystackSettings.premiumAmount : mockPaystackSettings.basicAmount) * months;
   const amountMinor = amountMajor * 100;
   const reference = `mock_pay_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
@@ -2190,6 +2278,7 @@ export const mockInitializeSubscriptionPayment = async (payload: {
     id: `pay-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     reference,
     userId: payload.userId,
+    plan,
     amountMinor,
     currencyCode: mockPaystackSettings.currencyCode,
     status: 'pending',
@@ -2203,6 +2292,7 @@ export const mockInitializeSubscriptionPayment = async (payload: {
     amountMinor,
     amountMajor,
     currencyCode: mockPaystackSettings.currencyCode,
+    plan,
     months,
     publicKey: mockPaystackSettings.paystackPublicKey || null
   };
@@ -2224,7 +2314,7 @@ export const mockVerifySubscriptionPayment = async (payload: {
     payment.status = 'successful';
     payment.createdAt = new Date().toISOString();
     await mockActivateUserSubscription(payment.userId, {
-      status: 'premium',
+      status: payment.plan,
       months: 1,
       note: 'Mock Paystack payment success'
     });

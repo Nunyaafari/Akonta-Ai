@@ -152,7 +152,7 @@ export const qualifyReferralFromSubscription = async (referredUserId: string): P
         data: {
           userId: referrer.id,
           source: 'referral_bonus',
-          status: 'premium',
+          status: 'basic',
           monthsGranted: REFERRAL_REWARD_MONTHS,
           startsAt: extensionStart,
           endsAt: extensionEnd,
@@ -164,7 +164,7 @@ export const qualifyReferralFromSubscription = async (referredUserId: string): P
       referrer = await tx.user.update({
         where: { id: referrer.id },
         data: {
-          subscriptionStatus: 'premium',
+          subscriptionStatus: 'basic',
           subscriptionEndsAt: extensionEnd,
           freeSubscriptionMonthsEarned: { increment: REFERRAL_REWARD_MONTHS }
         },

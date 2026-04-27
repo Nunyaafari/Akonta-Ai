@@ -527,6 +527,127 @@ const detectMissedYesterday = async (userId: string, businessId?: string): Promi
 const resolveConversationLogDate = (context: ConversationContext): Date =>
   context.logDateKey ? dateKeyToUtcDate(context.logDateKey) : new Date();
 
+type ProfitSummaryPeriod = 'last_week' | 'last_month';
+
+interface ProfitSummaryWindow {
+  period: ProfitSummaryPeriod;
+  label: string;
+  periodStart: Date;
+  periodEnd: Date;
+}
+
+const endOfUtcDay = (date: Date): Date => {
+  const dayStart = startOfUtcDate(date);
+  const nextDay = addUtcDays(dayStart, 1);
+  return new Date(nextDay.getTime() - 1);
+};
+
+const resolveProfitSummaryWindows = (text: string): ProfitSummaryWindow[] => {
+  const value = text.trim().toLowerCase();
+  if (!value) return [];
+
+  const hasProfitSignal = /\bprofit\b/.test(value)
+    || /\bhow much did we make\b/.test(value)
+    || (/\b(inflow|income|revenue)\b/.test(value) && /\b(outflow|expense|expenses|spent)\b/.test(value));
+
+  if (!hasProfitSignal) return [];
+
+  const asksWeekAndMonth = /\bweek\s*\/\s*month\b/.test(value);
+  const asksLastWeek = /(?:^|\s)(last|previous)\s+week\b/.test(value);
+  const asksLastMonth = /(?:^|\s)(last|previous)\s+month\b/.test(value);
+
+  const includeLastWeek = asksWeekAndMonth || asksLastWeek;
+  const includeLastMonth = asksWeekAndMonth || asksLastMonth;
+
+  const now = new Date();
+  const todayStart = startOfUtcDate(now);
+  const currentMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const windows: ProfitSummaryWindow[] = [];
+
+  if (includeLastWeek) {
+    const periodStart = addUtcDays(todayStart, -7);
+    const periodEnd = new Date(todayStart.getTime() - 1);
+    windows.push({
+      period: 'last_week',
+      label: 'Last week',
+      periodStart,
+      periodEnd
+    });
+  }
+
+  if (includeLastMonth) {
+    const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+    const periodEnd = new Date(currentMonthStart.getTime() - 1);
+    windows.push({
+      period: 'last_month',
+      label: 'Last month',
+      periodStart,
+      periodEnd
+    });
+  }
+
+  return windows;
+};
+
+const formatSummaryDate = (date: Date, display: ConversationDisplayPreferences): string => {
+  try {
+    return date.toLocaleDateString(display.locale, {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      timeZone: 'UTC'
+    });
+  } catch {
+    return date.toLocaleDateString('en-GH', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      timeZone: 'UTC'
+    });
+  }
+};
+
+const buildProfitSummaryReply = async (params: {
+  userId: string;
+  businessId?: string;
+  message: string;
+  display: ConversationDisplayPreferences;
+}): Promise<string | null> => {
+  const windows = resolveProfitSummaryWindows(params.message);
+  if (windows.length === 0) return null;
+
+  const lines: string[] = [];
+
+  for (const window of windows) {
+    const transactions = await db.transaction.findMany({
+      where: {
+        ...(params.businessId ? { businessId: params.businessId } : { userId: params.userId }),
+        status: 'confirmed',
+        correctionOfId: null,
+        isDeleted: false,
+        date: {
+          gte: window.periodStart,
+          lte: endOfUtcDay(window.periodEnd)
+        }
+      }
+    });
+
+    const summary = computeSummary(transactions);
+    const dateRange = `${formatSummaryDate(window.periodStart, params.display)} to ${formatSummaryDate(window.periodEnd, params.display)}`;
+
+    lines.push(`${window.label} (${dateRange})`);
+    lines.push(`Inflow: ${formatCurrencyForDisplay(summary.totalRevenue, params.display)}`);
+    lines.push(`Outflow: ${formatCurrencyForDisplay(summary.totalExpenses, params.display)}`);
+    lines.push(`Profit: ${formatCurrencyForDisplay(summary.profit, params.display)} (Inflow - Outflow)`);
+    if (transactions.length === 0) {
+      lines.push('No confirmed records were found for this period.');
+    }
+    lines.push('');
+  }
+
+  return lines.join('\n').trim();
+};
+
 const upsertDraftTransaction = async (params: {
   transactionId?: string;
   businessId?: string;
@@ -794,6 +915,25 @@ export const processConversationMessage = async (
       where: { id: session.id },
       data: { step, context: contextToJson(context) }
     });
+
+    return finalizeResult({
+      userId: params.userId,
+      botReply,
+      step,
+      touchedTransactions
+    });
+  }
+
+  const profitSummaryReply = await buildProfitSummaryReply({
+    userId: params.userId,
+    businessId: params.businessId,
+    message,
+    display
+  });
+  if (profitSummaryReply) {
+    const botReply = step === 'idle'
+      ? profitSummaryReply
+      : `${profitSummaryReply}\n\nYour current draft is still open. Continue when you are ready.`;
 
     return finalizeResult({
       userId: params.userId,

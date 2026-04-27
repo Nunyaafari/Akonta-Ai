@@ -90,6 +90,19 @@ const inviteMember = async (
   return json as InviteResponse;
 };
 
+const activatePremiumSubscription = async (request: APIRequestContext, userId: string) => {
+  const response = await request.post(`${API_BASE_URL}/api/users/${encodeURIComponent(userId)}/subscription`, {
+    data: {
+      status: 'premium',
+      source: 'paid',
+      months: 1,
+      note: 'E2E premium workspace setup'
+    }
+  });
+  const json = await asJson<{ id: string; subscriptionStatus: string } | { message: string }>(response);
+  expect(response.status(), JSON.stringify(json)).toBe(200);
+};
+
 const updateMembership = async (
   request: APIRequestContext,
   token: string,
@@ -178,6 +191,9 @@ test('otp login, owner invite, workspace switch, role restrictions, and logout r
     phoneNumber: secondaryOwnerPhone,
     code: await requestDevOtp(request, secondaryOwnerPhone)
   });
+
+  await activatePremiumSubscription(request, ownerApiSession.user.id);
+  await activatePremiumSubscription(request, secondaryApiSession.user.id);
 
   const crossWorkspaceInvite = await inviteMember(request, secondaryApiSession.tokens.accessToken, {
     fullName: 'E2E Owner',

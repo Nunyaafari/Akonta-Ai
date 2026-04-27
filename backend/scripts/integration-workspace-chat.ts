@@ -118,6 +118,18 @@ const main = async () => {
   const ownerToken = ownerVerify.json.tokens.accessToken;
   assert.ok(ownerToken, 'owner access token should exist');
 
+  const premiumActivate = await request<{ id: string; subscriptionStatus: string }>({
+    method: 'POST',
+    path: `/api/users/${encodeURIComponent(ownerVerify.json.user.id)}/subscription`,
+    body: {
+      status: 'premium',
+      source: 'paid',
+      months: 1,
+      note: 'Integration setup premium workspace'
+    }
+  });
+  assert.equal(premiumActivate.status, 200, 'owner premium activation should return 200');
+
   const invite = await request<InviteMemberResponse>({
     method: 'POST',
     path: '/api/workspaces/members/invite',
@@ -204,10 +216,33 @@ const main = async () => {
     'bot should continue to type/category/confirm stage'
   );
 
+  const chat3 = await request<ChatResponse>({
+    method: 'POST',
+    path: '/api/chat',
+    token: ownerToken,
+    body: {
+      message: 'how much profit did we make last week/month',
+      channel: 'web'
+    }
+  });
+
+  assert.equal(chat3.status, 200, 'profit-summary chat call should return 200');
+  assert.match(chat3.json.botReply, /Last week/i, 'profit summary should include last week block');
+  assert.match(chat3.json.botReply, /Last month/i, 'profit summary should include last month block');
+  assert.match(chat3.json.botReply, /Inflow:/i, 'profit summary should include inflow');
+  assert.match(chat3.json.botReply, /Outflow:/i, 'profit summary should include outflow');
+  assert.match(chat3.json.botReply, /Profit:.*Inflow - Outflow/i, 'profit summary should show formula');
+  assert.equal(
+    chat3.json.conversation.step,
+    chat2.json.conversation.step,
+    'profit summary question should not reset current draft step'
+  );
+
   console.log('\nIntegration checks passed:');
   console.log('- Owner bootstrap + OTP login');
   console.log('- Workspace invite + member OTP activation');
   console.log('- Expense-first chat regression fixed');
+  console.log('- Profit summary workflow (last week/month)');
 };
 
 main().catch((error) => {

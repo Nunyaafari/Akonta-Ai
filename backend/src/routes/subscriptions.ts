@@ -10,6 +10,7 @@ const subscriptionsRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post('/initialize', async (request, reply) => {
     const body = request.body as {
       userId?: string;
+      plan?: 'basic' | 'premium';
       months?: number;
       callbackUrl?: string;
       customerEmail?: string;
@@ -23,9 +24,14 @@ const subscriptionsRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(400).send({ message: 'months must be between 1 and 24.' });
     }
 
+    if (body.plan !== undefined && body.plan !== 'basic' && body.plan !== 'premium') {
+      return reply.status(400).send({ message: 'plan must be basic or premium.' });
+    }
+
     try {
       const initialized = await initializeSubscriptionPayment({
         userId: body.userId,
+        plan: body.plan,
         months: body.months,
         callbackUrl: body.callbackUrl,
         customerEmail: body.customerEmail

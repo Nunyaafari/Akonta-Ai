@@ -18,6 +18,14 @@ const isMembershipStatus = (value: unknown): value is MembershipStatus => {
   return typeof value === 'string' && membershipStatuses.includes(value as MembershipStatus);
 };
 
+const hasPremiumWorkspaceAccess = async (businessId: string): Promise<boolean> => {
+  const workspace = await db.business.findUnique({
+    where: { id: businessId },
+    select: { subscriptionStatus: true }
+  });
+  return workspace?.subscriptionStatus === 'premium';
+};
+
 const workspaceRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get('/', async (request, reply) => {
     const auth = await requireAuth(request, reply);
@@ -143,6 +151,10 @@ const workspaceRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(403).send({ message: 'Permission denied for member invites.' });
     }
 
+    if (!(await hasPremiumWorkspaceAccess(auth.businessId))) {
+      return reply.status(403).send({ message: 'Team workspace invites require Premium subscription.' });
+    }
+
     const body = request.body as {
       fullName?: string;
       email?: string;
@@ -239,6 +251,10 @@ const workspaceRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!hasPermission(auth.role, 'workspace:members:manage')) {
       return reply.status(403).send({ message: 'Permission denied for member updates.' });
+    }
+
+    if (!(await hasPremiumWorkspaceAccess(auth.businessId))) {
+      return reply.status(403).send({ message: 'Team workspace management requires Premium subscription.' });
     }
 
     const { membershipId } = request.params as { membershipId: string };

@@ -12,6 +12,7 @@ import summaryRoutes from './routes/summaries.js';
 import budgetRoutes from './routes/budgets.js';
 import insightRoutes from './routes/insights.js';
 import whatsappRoutes from './routes/whatsapp.js';
+import telegramRoutes from './routes/telegram.js';
 import chatRoutes from './routes/chat.js';
 import adminRoutes from './routes/admin.js';
 import subscriptionsRoutes from './routes/subscriptions.js';
@@ -131,6 +132,7 @@ app.addHook('onRequest', async (request, reply) => {
     '/api/health',
     '/api/whatsapp/webhook/twilio',
     '/api/whatsapp/webhook/infobip',
+    '/api/telegram/webhook',
     '/api/subscriptions/webhook/paystack'
   ]);
 
@@ -152,6 +154,7 @@ await app.register(summaryRoutes, { prefix: '/api/summaries' });
 await app.register(budgetRoutes, { prefix: '/api/budgets' });
 await app.register(insightRoutes, { prefix: '/api/insights' });
 await app.register(whatsappRoutes, { prefix: '/api/whatsapp' });
+await app.register(telegramRoutes, { prefix: '/api/telegram' });
 await app.register(chatRoutes, { prefix: '/api/chat' });
 await app.register(adminRoutes, { prefix: '/api/admin' });
 await app.register(subscriptionsRoutes, { prefix: '/api/subscriptions' });

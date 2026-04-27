@@ -3,6 +3,7 @@ import {
   applySuccessfulSubscriptionPayment,
   getPaymentStatusFromReference,
   initializeSubscriptionPayment,
+  runDueAutoRenewals,
   verifyPaystackWebhookSignature
 } from '../services/subscriptions.js';
 
@@ -59,6 +60,39 @@ const subscriptionsRoutes: FastifyPluginAsync = async (fastify) => {
     } catch (error) {
       fastify.log.error(error);
       return reply.status(400).send({ message: error instanceof Error ? error.message : 'Unable to verify payment.' });
+    }
+  });
+
+  fastify.post('/renewals/run', async (request, reply) => {
+    const body = request.body as {
+      dryRun?: boolean;
+      lookaheadDays?: number;
+      maxBusinesses?: number;
+      graceDays?: number;
+    };
+
+    if (body.lookaheadDays !== undefined && (!Number.isFinite(body.lookaheadDays) || body.lookaheadDays < 0 || body.lookaheadDays > 30)) {
+      return reply.status(400).send({ message: 'lookaheadDays must be between 0 and 30.' });
+    }
+
+    if (body.maxBusinesses !== undefined && (!Number.isFinite(body.maxBusinesses) || body.maxBusinesses < 1 || body.maxBusinesses > 1000)) {
+      return reply.status(400).send({ message: 'maxBusinesses must be between 1 and 1000.' });
+    }
+
+    if (body.graceDays !== undefined && (!Number.isFinite(body.graceDays) || body.graceDays < 1 || body.graceDays > 30)) {
+      return reply.status(400).send({ message: 'graceDays must be between 1 and 30.' });
+    }
+
+    try {
+      return await runDueAutoRenewals({
+        dryRun: body.dryRun,
+        lookaheadDays: body.lookaheadDays,
+        maxBusinesses: body.maxBusinesses,
+        graceDays: body.graceDays
+      });
+    } catch (error) {
+      fastify.log.error(error);
+      return reply.status(500).send({ message: error instanceof Error ? error.message : 'Unable to run renewal job.' });
     }
   });
 

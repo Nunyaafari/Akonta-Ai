@@ -2110,6 +2110,7 @@ export const mockGetAdminAnalytics = async (): Promise<AdminAnalytics> => {
       revenue: successful.reduce((sum, payment) => sum + payment.amountMinor / 100, 0)
     };
   });
+  const dailyRevenueTotal = daily.reduce((sum, day) => sum + day.revenue, 0);
 
   const allTransactions = Object.values(transactionsByUser).flat();
   const last30Start = new Date();
@@ -2153,6 +2154,50 @@ export const mockGetAdminAnalytics = async (): Promise<AdminAnalytics> => {
     .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
     .slice(0, 40);
 
+  const upcomingRenewals = users
+    .filter((user) => (user.subscriptionStatus === 'basic' || user.subscriptionStatus === 'premium') && Boolean(user.subscriptionEndsAt))
+    .map((user) => {
+      const renewalDate = new Date(user.subscriptionEndsAt as Date | string);
+      const msRemaining = renewalDate.getTime() - now.getTime();
+      const daysUntilRenewal = Math.max(0, Math.ceil(msRemaining / (24 * 60 * 60 * 1000)));
+      const plan = user.subscriptionStatus === 'premium' ? 'premium' as const : 'basic' as const;
+      const expectedAmount = plan === 'premium' ? mockPaystackSettings.premiumAmount : mockPaystackSettings.basicAmount;
+      return {
+        businessId: user.id,
+        businessName: user.businessName || `${user.name}'s Business`,
+        ownerName: user.fullName || user.name,
+        plan,
+        renewalDate: renewalDate.toISOString(),
+        daysUntilRenewal,
+        expectedAmount,
+        currencyCode: mockPaystackSettings.currencyCode,
+        autoRenewReady: false
+      };
+    })
+    .filter((entry) => entry.daysUntilRenewal <= 30)
+    .sort((a, b) => a.daysUntilRenewal - b.daysUntilRenewal)
+    .slice(0, 100);
+
+  const upcomingNext7 = upcomingRenewals.filter((item) => item.daysUntilRenewal <= 7);
+  const upcomingNext30 = upcomingRenewals.filter((item) => item.daysUntilRenewal <= 30);
+
+  const subscriptionRevenueLast30 = subscriptionPayments
+    .filter((payment) => payment.status === 'successful')
+    .filter((payment) => {
+      const created = new Date(payment.createdAt);
+      return created >= last30Start;
+    })
+    .reduce((sum, payment) => sum + payment.amountMinor / 100, 0);
+
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const subscriptionRevenueMonthToDate = subscriptionPayments
+    .filter((payment) => payment.status === 'successful')
+    .filter((payment) => {
+      const created = new Date(payment.createdAt);
+      return created >= monthStart;
+    })
+    .reduce((sum, payment) => sum + payment.amountMinor / 100, 0);
+
   return {
     users: {
       total,
@@ -2178,7 +2223,22 @@ export const mockGetAdminAnalytics = async (): Promise<AdminAnalytics> => {
     },
     subscriptions: {
       paidStarts: subscriptionPayments.filter((payment) => payment.status === 'successful').length,
-      daily
+      daily,
+      inflows: {
+        currencyCode: mockPaystackSettings.currencyCode,
+        last14Days: dailyRevenueTotal,
+        last30Days: subscriptionRevenueLast30,
+        monthToDate: subscriptionRevenueMonthToDate
+      },
+      upcomingRenewals: {
+        currencyCode: mockPaystackSettings.currencyCode,
+        next7DaysCount: upcomingNext7.length,
+        next30DaysCount: upcomingNext30.length,
+        expectedRevenueNext7Days: upcomingNext7.reduce((sum, item) => sum + item.expectedAmount, 0),
+        expectedRevenueNext30Days: upcomingNext30.reduce((sum, item) => sum + item.expectedAmount, 0),
+        autoRenewReadyCount: upcomingNext30.filter((item) => item.autoRenewReady).length,
+        list: upcomingRenewals
+      }
     },
     locations: Object.entries(locationCounts)
       .map(([location, count]) => ({ location, count }))

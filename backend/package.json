@@ -13,7 +13,8 @@
     "test:security": "tsx scripts/integration-security-rbac.ts",
     "test:ci": "npm run test:integration && npm run test:security",
     "rehearsal:staging-migration": "bash ./scripts/staging-migration-rehearsal.sh",
-    "ops:verify-backup-retention": "node ./scripts/verify-backup-retention.mjs"
+    "ops:verify-backup-retention": "node ./scripts/verify-backup-retention.mjs",
+    "ops:run-auto-renewals": "tsx scripts/run-auto-renewals.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",

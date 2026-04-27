@@ -74,6 +74,8 @@ Supported file-based secrets include:
 9. `WHATCHIMP_API_KEY_FILE`
 10. `PAYSTACK_SECRET_KEY_FILE`
 11. `PAYSTACK_WEBHOOK_SECRET_FILE`
+12. `TELEGRAM_BOT_TOKEN_FILE`
+13. `TELEGRAM_WEBHOOK_SECRET_FILE`
 
 Production compose expects a mounted directory:
 
@@ -93,6 +95,8 @@ Required filenames in the mount:
 9. `whatchimp_api_key`
 10. `paystack_secret_key`
 11. `paystack_webhook_secret`
+12. `telegram_bot_token`
+13. `telegram_webhook_secret`
 
 ## 4) Backup Retention Verification
 
@@ -137,3 +141,31 @@ npm run ops:verify-backup-retention
 ```
 
 The script writes a JSON evidence report (default under `backend/rehearsal-artifacts/`) and exits non-zero on failure.
+
+## Troubleshooting
+
+### Backend starts then `curl` shows `Recv failure: Connection reset by peer`
+
+This usually means the backend process crashed after container start (most often during `prisma migrate deploy`).
+
+1. Check backend logs:
+```bash
+docker compose logs --tail=200 backend
+```
+2. If logs show Prisma `P1000` auth errors, align DB credentials in local `.env`:
+```bash
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=change_me
+POSTGRES_DB=ledgermate
+DATABASE_URL=postgresql://postgres:change_me@db:5432/ledgermate
+```
+3. Restart:
+```bash
+docker compose up -d --build --force-recreate db backend
+```
+4. If the Postgres volume was initialized with a different password and this is a disposable local environment, reset volume:
+```bash
+docker compose down
+docker volume rm akontaai_akonta_pg_data
+docker compose up -d --build
+```

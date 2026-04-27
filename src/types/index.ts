@@ -366,6 +366,31 @@ export interface AdminAnalytics {
       count: number;
       revenue: number;
     }>;
+    inflows: {
+      currencyCode: string;
+      last14Days: number;
+      last30Days: number;
+      monthToDate: number;
+    };
+    upcomingRenewals: {
+      currencyCode: string;
+      next7DaysCount: number;
+      next30DaysCount: number;
+      expectedRevenueNext7Days: number;
+      expectedRevenueNext30Days: number;
+      autoRenewReadyCount: number;
+      list: Array<{
+        businessId: string;
+        businessName: string;
+        ownerName: string;
+        plan: 'basic' | 'premium';
+        renewalDate: string;
+        daysUntilRenewal: number;
+        expectedAmount: number;
+        currencyCode: string;
+        autoRenewReady: boolean;
+      }>;
+    };
   };
   locations: Array<{
     location: string;

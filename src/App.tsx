@@ -89,6 +89,7 @@ import {
 const brandMarkSrc = '/brand/akonta.svg';
 const appCopyrightNotice = `© ${new Date().getFullYear()} All rights reserved. Amagold Technologies Ltd.`;
 const supportedCurrencies = ['GHS', 'USD', 'NGN', 'KES', 'EUR', 'GBP'] as const;
+const PAID_SERVICE_GRACE_DAYS = 5;
 const planEquivalentLabel = {
   basic: 'Approx: NGN 1,500 • ZMW 100 • USD 4',
   premium: 'Approx: NGN 5,000 • ZMW 330 • USD 13'
@@ -105,8 +106,13 @@ const hasActivePremiumWindow = (user: User | null): boolean => {
   if (!user) return false;
   if (user.subscriptionStatus === 'free') return false;
   const accessEnd = parseDateValue(user.subscriptionEndsAt ?? user.trialEndsAt ?? null);
-  if (!accessEnd) return user.subscriptionStatus === 'basic' || user.subscriptionStatus === 'premium';
-  return accessEnd.getTime() > Date.now();
+  if (!accessEnd) return user.subscriptionStatus === 'basic' || user.subscriptionStatus === 'premium' || user.subscriptionStatus === 'trial';
+  if (user.subscriptionStatus === 'trial') {
+    return accessEnd.getTime() > Date.now();
+  }
+  const graceEnd = new Date(accessEnd);
+  graceEnd.setUTCDate(graceEnd.getUTCDate() + PAID_SERVICE_GRACE_DAYS);
+  return graceEnd.getTime() > Date.now();
 };
 
 const resolveDayPart = (timeZone?: string): 'morning' | 'afternoon' | 'evening' => {
@@ -3242,6 +3248,8 @@ export default function App() {
     const topLocations = (adminAnalytics?.locations ?? []).slice(0, 8);
     const topBusinessTypes = (adminAnalytics?.businessTypes ?? []).slice(0, 8);
     const recentActivity = adminAnalytics?.activity.recent ?? [];
+    const subscriptionCurrencyCode = adminAnalytics?.subscriptions.inflows.currencyCode ?? adminCurrencyCode;
+    const upcomingRenewals = adminAnalytics?.subscriptions.upcomingRenewals.list ?? [];
 
     return (
       <div className="min-h-screen bg-slate-50">
@@ -3297,11 +3305,74 @@ export default function App() {
             </div>
           </div>
 
+          <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+            <h2 className="text-lg font-semibold text-gray-900">Upcoming Renewals (Next 30 Days)</h2>
+            <p className="mt-1 text-sm text-gray-500">Forecasted renewal inflows and auto-renew readiness by workspace.</p>
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="rounded-2xl bg-gray-50 px-4 py-3">
+                <p className="text-xs uppercase tracking-wide text-gray-500">Due in 7 days</p>
+                <p className="mt-1 text-xl font-bold text-gray-900">{adminAnalytics?.subscriptions.upcomingRenewals.next7DaysCount ?? 0}</p>
+              </div>
+              <div className="rounded-2xl bg-gray-50 px-4 py-3">
+                <p className="text-xs uppercase tracking-wide text-gray-500">Due in 30 days</p>
+                <p className="mt-1 text-xl font-bold text-gray-900">{adminAnalytics?.subscriptions.upcomingRenewals.next30DaysCount ?? 0}</p>
+              </div>
+              <div className="rounded-2xl bg-gray-50 px-4 py-3">
+                <p className="text-xs uppercase tracking-wide text-gray-500">Expected 7-day inflow</p>
+                <p className="mt-1 text-xl font-bold text-gray-900">
+                  {formatCurrencyValue(adminAnalytics?.subscriptions.upcomingRenewals.expectedRevenueNext7Days ?? 0, subscriptionCurrencyCode)}
+                </p>
+              </div>
+              <div className="rounded-2xl bg-gray-50 px-4 py-3">
+                <p className="text-xs uppercase tracking-wide text-gray-500">Auto-renew ready</p>
+                <p className="mt-1 text-xl font-bold text-gray-900">
+                  {adminAnalytics?.subscriptions.upcomingRenewals.autoRenewReadyCount ?? 0}
+                </p>
+              </div>
+            </div>
+
+            {upcomingRenewals.length ? (
+              <div className="mt-4 overflow-x-auto rounded-2xl border border-gray-200">
+                <div className="min-w-[720px]">
+                  <div className="grid grid-cols-[1.5fr_1fr_1fr_1fr_1fr] bg-gray-50 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                    <span>Workspace</span>
+                    <span>Plan</span>
+                    <span>Renewal Date</span>
+                    <span>Expected</span>
+                    <span>Auto-Renew</span>
+                  </div>
+                  <div className="divide-y divide-gray-100">
+                    {upcomingRenewals.slice(0, 12).map((item) => (
+                      <div key={`${item.businessId}-${item.renewalDate}`} className="grid grid-cols-[1.5fr_1fr_1fr_1fr_1fr] px-4 py-3 text-sm">
+                        <div>
+                          <p className="font-semibold text-gray-900">{item.businessName}</p>
+                          <p className="text-xs text-gray-500">{item.ownerName}</p>
+                        </div>
+                        <span className="capitalize text-gray-700">{item.plan}</span>
+                        <span className="text-gray-700">
+                          {new Date(item.renewalDate).toLocaleDateString('en-GH', { month: 'short', day: 'numeric', year: 'numeric' })}
+                          <span className="ml-1 text-xs text-gray-500">({item.daysUntilRenewal}d)</span>
+                        </span>
+                        <span className="text-gray-900">{formatCurrencyValue(item.expectedAmount, item.currencyCode || subscriptionCurrencyCode)}</span>
+                        <span className={item.autoRenewReady ? 'font-semibold text-green-700' : 'font-semibold text-amber-700'}>
+                          {item.autoRenewReady ? 'Ready' : 'Missing auth'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <p className="mt-4 text-sm text-gray-500">No upcoming renewals in the next 30 days.</p>
+            )}
+          </div>
+
           <div className="grid gap-6 lg:grid-cols-3">
             <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm lg:col-span-2">
               <h2 className="text-lg font-semibold text-gray-900">Daily subscriptions (last 14 days)</h2>
               <p className="mt-1 text-sm text-gray-500">Successful paid subscriptions and estimated revenue per day.</p>
-              <div className="mt-4 grid grid-cols-2 gap-3">
+              <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
                 <div className="rounded-2xl bg-gray-50 px-4 py-3">
                   <p className="text-xs uppercase tracking-wide text-gray-500">Total subscriptions</p>
                   <p className="mt-1 text-xl font-bold text-gray-900">
@@ -3313,8 +3384,20 @@ export default function App() {
                   <p className="mt-1 text-xl font-bold text-gray-900">
                     {formatCurrencyValue(
                       adminAnalytics?.subscriptions.daily.reduce((sum, day) => sum + day.revenue, 0) ?? 0,
-                      adminCurrencyCode
+                      subscriptionCurrencyCode
                     )}
+                  </p>
+                </div>
+                <div className="rounded-2xl bg-gray-50 px-4 py-3">
+                  <p className="text-xs uppercase tracking-wide text-gray-500">Inflows (last 30 days)</p>
+                  <p className="mt-1 text-xl font-bold text-gray-900">
+                    {formatCurrencyValue(adminAnalytics?.subscriptions.inflows.last30Days ?? 0, subscriptionCurrencyCode)}
+                  </p>
+                </div>
+                <div className="rounded-2xl bg-gray-50 px-4 py-3">
+                  <p className="text-xs uppercase tracking-wide text-gray-500">Inflows (MTD)</p>
+                  <p className="mt-1 text-xl font-bold text-gray-900">
+                    {formatCurrencyValue(adminAnalytics?.subscriptions.inflows.monthToDate ?? 0, subscriptionCurrencyCode)}
                   </p>
                 </div>
               </div>
@@ -3327,7 +3410,7 @@ export default function App() {
                       <div key={day.date}>
                         <div className="mb-1 flex items-center justify-between text-xs text-gray-600">
                           <span>{new Date(`${day.date}T12:00:00Z`).toLocaleDateString('en-GH', { month: 'short', day: 'numeric' })}</span>
-                          <span>{day.count} subs • {formatCurrencyValue(day.revenue, adminCurrencyCode)}</span>
+                          <span>{day.count} subs • {formatCurrencyValue(day.revenue, subscriptionCurrencyCode)}</span>
                         </div>
                         <div className="h-2 overflow-hidden rounded-full bg-gray-100">
                           <div className="h-full rounded-full bg-green-500" style={{ width: `${width}%` }} />

@@ -38,6 +38,10 @@ services:
       PAYSTACK_WEBHOOK_SECRET_FILE: /run/secrets/akonta/paystack_webhook_secret
       TELEGRAM_BOT_TOKEN_FILE: /run/secrets/akonta/telegram_bot_token
       TELEGRAM_WEBHOOK_SECRET_FILE: /run/secrets/akonta/telegram_webhook_secret
+      SUBSCRIPTION_RENEWALS_ENABLED: ${SUBSCRIPTION_RENEWALS_ENABLED:-true}
+      SUBSCRIPTION_RENEWALS_HOUR_UTC: ${SUBSCRIPTION_RENEWALS_HOUR_UTC:-2}
+      SUBSCRIPTION_RENEWALS_MAX_BUSINESSES: ${SUBSCRIPTION_RENEWALS_MAX_BUSINESSES:-300}
+      SUBSCRIPTION_RENEWAL_GRACE_DAYS: ${SUBSCRIPTION_RENEWAL_GRACE_DAYS:-5}
     volumes:
       - ${SECRETS_MOUNT_PATH:-./docker/secrets/local}:/run/secrets/akonta:ro
     depends_on:

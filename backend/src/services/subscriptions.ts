@@ -12,12 +12,19 @@ interface PaystackEnvelope<TData = unknown> {
 }
 
 type SubscriptionPlan = 'basic' | 'premium';
+type RenewalSource = 'webhook' | 'client_verify' | 'renewal_job';
 
 const addMonthsUtc = (value: Date, months: number): Date => {
   const next = new Date(value);
   next.setUTCMonth(next.getUTCMonth() + months);
   return next;
 };
+
+const startOfUtcDay = (value: Date): Date =>
+  new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()));
+
+const addDaysUtc = (value: Date, days: number): Date =>
+  new Date(value.getTime() + days * 24 * 60 * 60 * 1000);
 
 const parsePositiveInt = (value: unknown, fallback = 1): number => {
   const parsed = Number(value);
@@ -100,6 +107,63 @@ const verifyPaystackReference = async (reference: string, secretKey: string): Pr
   }
 
   return body.data;
+};
+
+const chargePaystackAuthorization = async (params: {
+  secretKey: string;
+  email: string;
+  authorizationCode: string;
+  amountMinor: number;
+  currencyCode: string;
+  metadata: Record<string, unknown>;
+}) => {
+  const response = await fetch(`${PAYSTACK_BASE_URL}/transaction/charge_authorization`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${params.secretKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      email: params.email,
+      authorization_code: params.authorizationCode,
+      amount: params.amountMinor,
+      currency: params.currencyCode,
+      metadata: params.metadata
+    })
+  });
+
+  const body = (await response.json().catch(() => null)) as PaystackEnvelope<Record<string, unknown>> | null;
+  if (!response.ok || !body?.status || !body?.data) {
+    const errorMessage = body?.message || `Paystack charge authorization failed with status ${response.status}`;
+    throw new Error(errorMessage);
+  }
+  return body.data;
+};
+
+const extractAuthorizationFromMetadata = (metadata: Prisma.JsonValue | null | undefined): {
+  authorizationCode: string | null;
+  reusable: boolean;
+} => {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    return { authorizationCode: null, reusable: false };
+  }
+
+  const root = metadata as Record<string, unknown>;
+  const verificationData = root.verificationData;
+  if (!verificationData || typeof verificationData !== 'object' || Array.isArray(verificationData)) {
+    return { authorizationCode: null, reusable: false };
+  }
+
+  const authorization = (verificationData as Record<string, unknown>).authorization;
+  if (!authorization || typeof authorization !== 'object' || Array.isArray(authorization)) {
+    return { authorizationCode: null, reusable: false };
+  }
+
+  const authorizationCode = asTrimmedString((authorization as Record<string, unknown>).authorization_code) || null;
+  const reusableRaw = (authorization as Record<string, unknown>).reusable;
+  const reusable = reusableRaw === true || asTrimmedString(reusableRaw).toLowerCase() === 'true';
+
+  return { authorizationCode, reusable };
 };
 
 export const initializeSubscriptionPayment = async (params: {
@@ -236,7 +300,7 @@ const isSuccessfulPaystackStatus = (status: unknown): boolean => {
 
 export const applySuccessfulSubscriptionPayment = async (params: {
   reference: string;
-  source: 'webhook' | 'client_verify';
+  source: RenewalSource;
   payload?: unknown;
 }) => {
   const reference = asTrimmedString(params.reference);
@@ -456,4 +520,335 @@ export const verifyPaystackWebhookSignature = async (params: {
 
 export const getResolvedPaystackAdminSettings = async () => {
   return getPaystackConfig();
+};
+
+export const runDueAutoRenewals = async (params?: {
+  dryRun?: boolean;
+  lookaheadDays?: number;
+  maxBusinesses?: number;
+  graceDays?: number;
+}) => {
+  const settings = await getPaystackConfig();
+  const dryRun = Boolean(params?.dryRun);
+  if (!settings.secretKey && !dryRun) {
+    throw new Error('Paystack secret key is not configured.');
+  }
+
+  const now = new Date();
+  const todayStart = startOfUtcDay(now);
+  const lookaheadDays = parsePositiveInt(params?.lookaheadDays, 0);
+  const maxBusinesses = parsePositiveInt(params?.maxBusinesses, 100);
+  const graceDays = parsePositiveInt(params?.graceDays, 5);
+  const dueCutoff = addDaysUtc(todayStart, lookaheadDays + 1);
+  dueCutoff.setMilliseconds(dueCutoff.getMilliseconds() - 1);
+
+  const candidateBusinesses = await db.business.findMany({
+    where: {
+      subscriptionStatus: { in: ['basic', 'premium'] },
+      owner: {
+        is: {
+          subscriptionEndsAt: {
+            not: null,
+            lte: dueCutoff
+          }
+        }
+      }
+    },
+    select: {
+      id: true,
+      businessName: true,
+      subscriptionStatus: true,
+      owner: {
+        select: {
+          id: true,
+          email: true,
+          phoneNumber: true,
+          subscriptionEndsAt: true
+        }
+      }
+    },
+    orderBy: { createdAt: 'asc' },
+    take: maxBusinesses
+  });
+
+  const results: Array<{
+    businessId: string;
+    businessName: string;
+    status: 'charged' | 'pending' | 'skipped' | 'failed' | 'dry_run' | 'downgraded';
+    reason?: string;
+    reference?: string;
+    amountMinor?: number;
+  }> = [];
+
+  const tryDowngradeIfPastGrace = async (params: {
+    businessId: string;
+    businessName: string;
+    ownerUserId: string;
+    dueAt: Date;
+    reason: string;
+  }) => {
+    const graceEndsAt = addDaysUtc(params.dueAt, graceDays);
+    if (now.getTime() <= graceEndsAt.getTime()) {
+      const daysRemaining = Math.max(0, Math.ceil((graceEndsAt.getTime() - now.getTime()) / (24 * 60 * 60 * 1000)));
+      results.push({
+        businessId: params.businessId,
+        businessName: params.businessName,
+        status: 'skipped',
+        reason: `${params.reason} (within grace period: ${daysRemaining} day${daysRemaining === 1 ? '' : 's'} left)`
+      });
+      return;
+    }
+
+    if (dryRun) {
+      results.push({
+        businessId: params.businessId,
+        businessName: params.businessName,
+        status: 'dry_run',
+        reason: `${params.reason} (would downgrade: grace exceeded)`
+      });
+      return;
+    }
+
+    await db.$transaction(async (tx) => {
+      await tx.business.update({
+        where: { id: params.businessId },
+        data: { subscriptionStatus: 'free' }
+      });
+
+      const otherPaidOwnedBusiness = await tx.business.findFirst({
+        where: {
+          ownerUserId: params.ownerUserId,
+          id: { not: params.businessId },
+          subscriptionStatus: { in: ['basic', 'premium'] }
+        },
+        select: { id: true }
+      });
+
+      if (!otherPaidOwnedBusiness) {
+        await tx.user.update({
+          where: { id: params.ownerUserId },
+          data: {
+            subscriptionStatus: 'free',
+            subscriptionEndsAt: null
+          }
+        });
+      }
+
+      await tx.subscriptionGrant.create({
+        data: {
+          businessId: params.businessId,
+          userId: params.ownerUserId,
+          source: 'admin_adjustment',
+          status: 'free',
+          monthsGranted: 0,
+          startsAt: now,
+          note: `Auto downgrade after ${graceDays}-day renewal grace period`,
+          metadata: {
+            source: 'auto-renewal',
+            reason: params.reason,
+            dueAt: params.dueAt.toISOString(),
+            graceDays
+          } as Prisma.InputJsonValue
+        }
+      });
+    });
+
+    results.push({
+      businessId: params.businessId,
+      businessName: params.businessName,
+      status: 'downgraded',
+      reason: `${params.reason} (grace period exceeded)`
+    });
+  };
+
+  for (const business of candidateBusinesses) {
+    const dueAt = business.owner.subscriptionEndsAt;
+    if (!dueAt || dueAt > dueCutoff) {
+      results.push({
+        businessId: business.id,
+        businessName: business.businessName,
+        status: 'skipped',
+        reason: 'Not due yet'
+      });
+      continue;
+    }
+
+    const existingToday = await db.subscriptionPayment.findFirst({
+      where: {
+        businessId: business.id,
+        createdAt: { gte: todayStart },
+        status: { in: ['pending', 'successful'] }
+      },
+      select: { id: true, reference: true }
+    });
+    if (existingToday) {
+      results.push({
+        businessId: business.id,
+        businessName: business.businessName,
+        status: 'skipped',
+        reason: `Renewal already attempted today (${existingToday.reference})`
+      });
+      continue;
+    }
+
+    const latestSuccessfulPayment = await db.subscriptionPayment.findFirst({
+      where: {
+        businessId: business.id,
+        status: 'successful'
+      },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        metadata: true,
+        customerEmail: true,
+        currencyCode: true
+      }
+    });
+
+    if (!latestSuccessfulPayment) {
+      await tryDowngradeIfPastGrace({
+        businessId: business.id,
+        businessName: business.businessName,
+        ownerUserId: business.owner.id,
+        dueAt,
+        reason: 'No successful payment history found'
+      });
+      continue;
+    }
+
+    const auth = extractAuthorizationFromMetadata(latestSuccessfulPayment.metadata);
+    if (!auth.authorizationCode || !auth.reusable) {
+      await tryDowngradeIfPastGrace({
+        businessId: business.id,
+        businessName: business.businessName,
+        ownerUserId: business.owner.id,
+        dueAt,
+        reason: 'No reusable authorization available'
+      });
+      continue;
+    }
+
+    const plan: SubscriptionPlan = business.subscriptionStatus === 'premium' ? 'premium' : 'basic';
+    const months = 1;
+    const amountMajor = plan === 'premium' ? settings.premiumAmountMajor : settings.basicAmountMajor;
+    const amountMinor = amountMajor * 100;
+    const currencyCode = asTrimmedString(latestSuccessfulPayment.currencyCode || settings.currencyCode).toUpperCase();
+    const customerEmail = asTrimmedString(latestSuccessfulPayment.customerEmail || business.owner.email)
+      || `${business.owner.id}@akonta.local`;
+
+    if (params?.dryRun) {
+      results.push({
+        businessId: business.id,
+        businessName: business.businessName,
+        status: 'dry_run',
+        reason: 'Eligible for renewal charge',
+        amountMinor
+      });
+      continue;
+    }
+
+    try {
+      const chargeResult = await chargePaystackAuthorization({
+        secretKey: settings.secretKey!,
+        email: customerEmail,
+        authorizationCode: auth.authorizationCode,
+        amountMinor,
+        currencyCode,
+        metadata: {
+          userId: business.owner.id,
+          businessId: business.id,
+          months,
+          plan,
+          renewal: true,
+          source: 'auto-renewal'
+        }
+      });
+
+      const reference = asTrimmedString(chargeResult.reference);
+      if (!reference) {
+        await tryDowngradeIfPastGrace({
+          businessId: business.id,
+          businessName: business.businessName,
+          ownerUserId: business.owner.id,
+          dueAt,
+          reason: 'Missing reference from charge response'
+        });
+        continue;
+      }
+
+      const chargeStatus = asTrimmedString(chargeResult.status).toLowerCase();
+
+      if (chargeStatus === 'success') {
+        await applySuccessfulSubscriptionPayment({
+          reference,
+          source: 'renewal_job',
+          payload: chargeResult
+        });
+        results.push({
+          businessId: business.id,
+          businessName: business.businessName,
+          status: 'charged',
+          reference,
+          amountMinor
+        });
+        continue;
+      }
+
+      await db.subscriptionPayment.create({
+        data: {
+          businessId: business.id,
+          userId: business.owner.id,
+          provider: 'paystack',
+          reference,
+          amountMinor,
+          currencyCode,
+          monthsPurchased: months,
+          status: 'pending',
+          customerEmail,
+          metadata: {
+            source: 'auto-renewal',
+            chargeResult,
+            plan
+          } as Prisma.InputJsonValue
+        }
+      }).catch(async (error) => {
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+          return;
+        }
+        throw error;
+      });
+
+      results.push({
+        businessId: business.id,
+        businessName: business.businessName,
+        status: 'pending',
+        reference,
+        amountMinor
+      });
+    } catch (error) {
+      await tryDowngradeIfPastGrace({
+        businessId: business.id,
+        businessName: business.businessName,
+        ownerUserId: business.owner.id,
+        dueAt,
+        reason: error instanceof Error ? error.message : 'Unknown renewal failure'
+      });
+    }
+  }
+
+  return {
+    dryRun,
+    asOf: now.toISOString(),
+    dueCutoff: dueCutoff.toISOString(),
+    graceDays,
+    summary: {
+      totalCandidates: candidateBusinesses.length,
+      charged: results.filter((row) => row.status === 'charged').length,
+      pending: results.filter((row) => row.status === 'pending').length,
+      dryRunEligible: results.filter((row) => row.status === 'dry_run').length,
+      skipped: results.filter((row) => row.status === 'skipped').length,
+      downgraded: results.filter((row) => row.status === 'downgraded').length,
+      failed: results.filter((row) => row.status === 'failed').length
+    },
+    results
+  };
 };

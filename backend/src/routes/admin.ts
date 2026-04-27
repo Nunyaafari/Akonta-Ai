@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
+import type { Prisma } from '@prisma/client';
 import db from '../lib/db.js';
 import { config } from '../lib/env.js';
 import {
@@ -22,6 +23,19 @@ const normalizedCurrencyCode = (value: unknown): string | null => {
   const text = asTrimmedString(value).toUpperCase();
   if (!text) return null;
   return /^[A-Z]{3}$/.test(text) ? text : null;
+};
+
+const extractReusableAuthorizationCode = (metadata: Prisma.JsonValue | null | undefined): string | null => {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
+  const root = metadata as Record<string, unknown>;
+  const verificationData = root.verificationData;
+  if (!verificationData || typeof verificationData !== 'object' || Array.isArray(verificationData)) return null;
+  const authorization = (verificationData as Record<string, unknown>).authorization;
+  if (!authorization || typeof authorization !== 'object' || Array.isArray(authorization)) return null;
+  const code = asTrimmedString((authorization as Record<string, unknown>).authorization_code);
+  const reusable = (authorization as Record<string, unknown>).reusable;
+  const reusableFlag = reusable === true || asTrimmedString(reusable).toLowerCase() === 'true';
+  return reusableFlag && code ? code : null;
 };
 
 const adminRoutes: FastifyPluginAsync = async (fastify) => {
@@ -69,7 +83,10 @@ const adminRoutes: FastifyPluginAsync = async (fastify) => {
       })
     ]);
 
-    const configuredProvider = await getConfiguredProvider();
+    const [configuredProvider, paystackSettings] = await Promise.all([
+      getConfiguredProvider(),
+      getResolvedPaystackAdminSettings()
+    ]);
 
     const now = new Date();
     const days = 14;
@@ -210,6 +227,115 @@ const adminRoutes: FastifyPluginAsync = async (fastify) => {
       };
     });
 
+    const dailyRevenueTotal = daily.reduce((sum, day) => sum + day.revenue, 0);
+
+    const [subscriptionRevenueLast30Aggregate, subscriptionRevenueMtdAggregate] = await Promise.all([
+      db.subscriptionPayment.aggregate({
+        where: {
+          status: 'successful',
+          createdAt: { gte: activityWindowStart }
+        },
+        _sum: { amountMinor: true }
+      }),
+      db.subscriptionPayment.aggregate({
+        where: {
+          status: 'successful',
+          createdAt: { gte: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)) }
+        },
+        _sum: { amountMinor: true }
+      })
+    ]);
+
+    const upcomingWindowStart = startOfUtcDay(now);
+    const upcomingWindowEnd = addDaysUtc(upcomingWindowStart, 31);
+    upcomingWindowEnd.setMilliseconds(upcomingWindowEnd.getMilliseconds() - 1);
+
+    const upcomingRenewalBusinesses = await db.business.findMany({
+      where: {
+        subscriptionStatus: { in: ['basic', 'premium'] },
+        owner: {
+          is: {
+            subscriptionEndsAt: {
+              not: null,
+              gte: upcomingWindowStart,
+              lte: upcomingWindowEnd
+            }
+          }
+        }
+      },
+      select: {
+        id: true,
+        businessName: true,
+        subscriptionStatus: true,
+        owner: {
+          select: {
+            id: true,
+            name: true,
+            fullName: true,
+            subscriptionEndsAt: true
+          }
+        }
+      },
+      take: 100,
+      orderBy: {
+        owner: {
+          subscriptionEndsAt: 'asc'
+        }
+      }
+    });
+
+    const renewalBusinessIds = upcomingRenewalBusinesses.map((item) => item.id);
+    const latestSuccessfulRenewalPayments = renewalBusinessIds.length
+      ? await db.subscriptionPayment.findMany({
+        where: {
+          businessId: { in: renewalBusinessIds },
+          status: 'successful'
+        },
+        orderBy: [{ businessId: 'asc' }, { createdAt: 'desc' }],
+        select: {
+          businessId: true,
+          customerEmail: true,
+          metadata: true
+        }
+      })
+      : [];
+
+    const paymentByBusinessId = new Map<string, { customerEmail: string | null; metadata: Prisma.JsonValue | null }>();
+    for (const payment of latestSuccessfulRenewalPayments) {
+      if (!payment.businessId || paymentByBusinessId.has(payment.businessId)) continue;
+      paymentByBusinessId.set(payment.businessId, {
+        customerEmail: payment.customerEmail ?? null,
+        metadata: payment.metadata
+      });
+    }
+
+    const upcomingRenewals = upcomingRenewalBusinesses.map((business) => {
+      const renewalDate = business.owner.subscriptionEndsAt ?? now;
+      const msRemaining = renewalDate.getTime() - now.getTime();
+      const daysUntilRenewal = Math.max(0, Math.ceil(msRemaining / (24 * 60 * 60 * 1000)));
+      const plan = business.subscriptionStatus === 'premium' ? 'premium' : 'basic';
+      const expectedAmount = plan === 'premium'
+        ? paystackSettings.premiumAmountMajor
+        : paystackSettings.basicAmountMajor;
+      const payment = paymentByBusinessId.get(business.id);
+      const autoRenewReady = Boolean(payment && extractReusableAuthorizationCode(payment.metadata));
+
+      return {
+        businessId: business.id,
+        businessName: business.businessName,
+        ownerName: business.owner.fullName || business.owner.name,
+        plan,
+        renewalDate: renewalDate.toISOString(),
+        daysUntilRenewal,
+        expectedAmount,
+        currencyCode: paystackSettings.currencyCode,
+        autoRenewReady
+      };
+    });
+
+    const upcomingNext7 = upcomingRenewals.filter((item) => item.daysUntilRenewal <= 7);
+    const upcomingNext30 = upcomingRenewals.filter((item) => item.daysUntilRenewal <= 30);
+
     const recentActivity = [
       ...recentAuditLogs.map((log) => ({
         id: `audit-${log.id}`,
@@ -272,7 +398,22 @@ const adminRoutes: FastifyPluginAsync = async (fastify) => {
       },
       subscriptions: {
         paidStarts: subscriptionStarts,
-        daily
+        daily,
+        inflows: {
+          currencyCode: paystackSettings.currencyCode,
+          last14Days: dailyRevenueTotal,
+          last30Days: ((subscriptionRevenueLast30Aggregate._sum.amountMinor ?? 0) / 100),
+          monthToDate: ((subscriptionRevenueMtdAggregate._sum.amountMinor ?? 0) / 100)
+        },
+        upcomingRenewals: {
+          currencyCode: paystackSettings.currencyCode,
+          next7DaysCount: upcomingNext7.length,
+          next30DaysCount: upcomingNext30.length,
+          expectedRevenueNext7Days: upcomingNext7.reduce((sum, item) => sum + item.expectedAmount, 0),
+          expectedRevenueNext30Days: upcomingNext30.reduce((sum, item) => sum + item.expectedAmount, 0),
+          autoRenewReadyCount: upcomingNext30.filter((item) => item.autoRenewReady).length,
+          list: upcomingRenewals
+        }
       },
       locations: businessLocationGroups
         .map((row) => ({

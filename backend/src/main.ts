@@ -16,6 +16,7 @@ import telegramRoutes from './routes/telegram.js';
 import chatRoutes from './routes/chat.js';
 import adminRoutes from './routes/admin.js';
 import subscriptionsRoutes from './routes/subscriptions.js';
+import { startSubscriptionRenewalScheduler } from './services/subscriptionRenewalScheduler.js';
 
 const isProduction = config.NODE_ENV === 'production';
 
@@ -160,6 +161,11 @@ await app.register(adminRoutes, { prefix: '/api/admin' });
 await app.register(subscriptionsRoutes, { prefix: '/api/subscriptions' });
 
 app.get('/api/health', async () => ({ status: 'ok' }));
+
+const stopRenewalScheduler = startSubscriptionRenewalScheduler(app.log);
+app.addHook('onClose', async () => {
+  stopRenewalScheduler();
+});
 
 const port = Number(config.PORT ?? 4000);
 await app.listen({ port, host: '0.0.0.0' });

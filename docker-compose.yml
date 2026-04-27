@@ -2,11 +2,11 @@ services:
   db:
     image: postgres:16
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: ledgermate
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-ledgermate}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d ledgermate"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-ledgermate}"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -22,7 +22,7 @@ services:
       dockerfile: Dockerfile
     environment:
       NODE_ENV: development
-      DATABASE_URL: postgresql://postgres:password@db:5432/ledgermate
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:change_me@db:5432/ledgermate}
       PORT: 4000
       APP_ORIGIN: http://localhost:5173
       BACKEND_API_KEY: ${BACKEND_API_KEY:-}
@@ -32,6 +32,10 @@ services:
       TWILIO_WEBHOOK_VALIDATE_SIGNATURE: ${TWILIO_WEBHOOK_VALIDATE_SIGNATURE:-false}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+      SUBSCRIPTION_RENEWALS_ENABLED: ${SUBSCRIPTION_RENEWALS_ENABLED:-true}
+      SUBSCRIPTION_RENEWALS_HOUR_UTC: ${SUBSCRIPTION_RENEWALS_HOUR_UTC:-2}
+      SUBSCRIPTION_RENEWALS_MAX_BUSINESSES: ${SUBSCRIPTION_RENEWALS_MAX_BUSINESSES:-300}
+      SUBSCRIPTION_RENEWAL_GRACE_DAYS: ${SUBSCRIPTION_RENEWAL_GRACE_DAYS:-5}
     depends_on:
       db:
         condition: service_healthy

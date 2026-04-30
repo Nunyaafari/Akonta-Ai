@@ -74,6 +74,13 @@ export const config = {
   OTP_MAX_REQUESTS_PER_PHONE_WINDOW: parseNumber(readConfigValue('OTP_MAX_REQUESTS_PER_PHONE_WINDOW', '5'), 5),
   OTP_MAX_REQUESTS_PER_IP_WINDOW: parseNumber(readConfigValue('OTP_MAX_REQUESTS_PER_IP_WINDOW', '20'), 20),
   OTP_MIN_SECONDS_BETWEEN_REQUESTS: parseNumber(readConfigValue('OTP_MIN_SECONDS_BETWEEN_REQUESTS', '30'), 30),
+  ONBOARDING_V2_ENABLED: parseBoolean(readConfigValue('ONBOARDING_V2_ENABLED', 'true'), true),
+  MASTERDATA_V1_ENABLED: parseBoolean(readConfigValue('MASTERDATA_V1_ENABLED', 'true'), true),
+  DEFAULT_LEDGER_V1_ENABLED: parseBoolean(readConfigValue('DEFAULT_LEDGER_V1_ENABLED', 'true'), true),
+  CLASSIFICATION_GUARDRAILS_V1_ENABLED: parseBoolean(
+    readConfigValue('CLASSIFICATION_GUARDRAILS_V1_ENABLED', 'true'),
+    true
+  ),
   WHATSAPP_PROVIDER: readConfigValue('WHATSAPP_PROVIDER', 'whatchimp').toLowerCase(),
   TWILIO_ACCOUNT_SID: readConfigValue('TWILIO_ACCOUNT_SID', ''),
   TWILIO_AUTH_TOKEN: readConfigValue('TWILIO_AUTH_TOKEN', ''),

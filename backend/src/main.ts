@@ -16,6 +16,7 @@ import telegramRoutes from './routes/telegram.js';
 import chatRoutes from './routes/chat.js';
 import adminRoutes from './routes/admin.js';
 import subscriptionsRoutes from './routes/subscriptions.js';
+import settingsRoutes from './routes/settings.js';
 import { startSubscriptionRenewalScheduler } from './services/subscriptionRenewalScheduler.js';
 
 const isProduction = config.NODE_ENV === 'production';
@@ -159,6 +160,9 @@ await app.register(telegramRoutes, { prefix: '/api/telegram' });
 await app.register(chatRoutes, { prefix: '/api/chat' });
 await app.register(adminRoutes, { prefix: '/api/admin' });
 await app.register(subscriptionsRoutes, { prefix: '/api/subscriptions' });
+if (config.MASTERDATA_V1_ENABLED || config.ONBOARDING_V2_ENABLED) {
+  await app.register(settingsRoutes, { prefix: '/api/settings' });
+}
 
 app.get('/api/health', async () => ({ status: 'ok' }));
 

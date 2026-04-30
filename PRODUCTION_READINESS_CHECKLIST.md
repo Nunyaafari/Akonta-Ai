@@ -152,6 +152,25 @@ Use this as a release gate. Every item must be marked **Pass** with evidence bef
 1. Script invocation attempted.
 2. Blocked due missing PostgreSQL CLI tools (`psql`, `pg_dump`, `pg_restore`) on current machine.
 
+### Item 3 Verification Evidence (2026-04-28)
+- Added Docker-native rehearsal path to remove local CLI dependency:
+1. `backend/scripts/staging-migration-rehearsal-docker.sh`
+2. `backend/package.json` script: `rehearsal:staging-migration:docker`
+3. `backend/STAGING_MIGRATION_REHEARSAL.md` updated with Docker mode instructions.
+- Added legacy workspace backfill migration to enforce integrity invariants:
+1. `backend/prisma/migrations/202604281500_legacy_business_backfill/migration.sql`
+2. Backfills null `businessId` in `ConversationSession`, `CustomLineItem`, `Summary`, `Budget`, `SubscriptionGrant`, `SubscriptionPayment`.
+- Rehearsal run executed successfully:
+1. Command: `DATABASE_URL=postgresql://postgres:change_me@127.0.0.1:5433/ledgermate npm run rehearsal:staging-migration:docker`
+2. Artifact root: `backend/rehearsal-artifacts/20260428T145822Z/`
+3. `SUMMARY.md` result: `PASS`
+4. Parity results: `parity_diff.txt` empty, `rollback_diff.txt` empty
+5. Invariant results: all invariant counts are `0` in `work_invariants.txt` (including `invariant_sessions_missing_business_id|0`)
+6. Baseline metrics captured and preserved:
+   - `users_total|30`
+   - `transactions_total|18`
+   - `transactions_amount_total|7395.00`
+
 ### Item 3 Progress (2026-04-25)
 - Added CI workflow for backend integration/security suites:
 1. `.github/workflows/backend-integration.yml`
@@ -179,5 +198,5 @@ Use this as a release gate. Every item must be marked **Pass** with evidence bef
 ## Immediate Next Actions
 1. Finish role-aware frontend gating matrix validation (cashier/viewer restrictions) with screenshots/evidence.
 2. Run end-to-end OTP/workspace/member lifecycle tests on desktop + mobile viewport and attach artifacts.
-3. Perform staging migration rehearsal and publish validation report before production cutover.
+3. Repeat migration rehearsal on staging clone from latest production-like snapshot and attach artifact path to release ticket.
 4. Monitor new `Infra Hardening` GitHub Actions workflow and attach first successful run URL to this checklist.

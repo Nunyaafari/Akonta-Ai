@@ -28,6 +28,7 @@ export interface TelegramProviderStatus {
 export interface Transaction {
   id: string;
   userId: string;
+  businessId?: string | null;
   type: 'revenue' | 'expense';
   eventType?:
     | 'cash_sale'
@@ -47,8 +48,15 @@ export interface Transaction {
   date: Date;
   notes?: string;
   category?: string;
+  parseConfidence?: 'high' | 'medium' | 'low';
+  requiresReview?: boolean;
+  productServiceId?: string | null;
+  customerId?: string | null;
+  supplierId?: string | null;
+  businessCategoryId?: string | null;
   correctionReason?: string;
   correctionOfId?: string | null;
+  ledgerPostingStatus?: 'not_configured' | 'pending' | 'posted' | 'failed' | 'skipped';
   confirmedAt?: Date | string | null;
   attachmentName?: string;
   createdAt: Date;
@@ -119,6 +127,18 @@ export interface SummaryPayload {
     totalCashInflow: number;
     totalCashOutflow: number;
     netCashFlow: number;
+  };
+  completeness: {
+    totalRecords: number;
+    assignedSalesCount: number;
+    unassignedSalesCount: number;
+    assignedSalesAmount: number;
+    unassignedSalesAmount: number;
+    productAssignmentRatio: number;
+    lowConfidenceCount: number;
+    mediumConfidenceCount: number;
+    reviewFlaggedCount: number;
+    completenessScore: number;
   };
 }
 
@@ -295,6 +315,259 @@ export interface WorkspaceMember {
   };
 }
 
+export type BusinessPaymentMethod = 'cash' | 'momo' | 'bank' | 'card' | 'credit';
+export type BusinessCategoryKind = 'sales' | 'expense';
+export type ProductServiceType = 'product' | 'service';
+
+export interface BusinessSettingsProfile {
+  id: string;
+  businessName: string;
+  businessType?: string | null;
+  currencyCode: string;
+  timezone: string;
+  enabledPaymentMethods?: BusinessPaymentMethod[] | null;
+  onboardingVersion: number;
+  onboardingCompletedAt?: string | null;
+  setupCounts: {
+    products: number;
+    customers: number;
+    suppliers: number;
+    categories: number;
+    ledgerAccounts: number;
+  };
+  onboardingProfile?: {
+    required: {
+      hasBusinessName: boolean;
+      hasBusinessType: boolean;
+      hasCurrencyCode: boolean;
+      hasTimezone: boolean;
+      hasPaymentMethods: boolean;
+    };
+    setupModules: {
+      hasCategories: boolean;
+      hasProducts: boolean;
+      hasCustomers: boolean;
+      hasSuppliers: boolean;
+      hasDefaultLedger: boolean;
+    };
+    completion: {
+      requiredCompleted: number;
+      requiredTotal: number;
+      requiredCompletionPercent: number;
+      setupCompleted: number;
+      setupTotal: number;
+      setupCompletionPercent: number;
+      overallCompletionPercent: number;
+    };
+    isReadyForFirstRecord: boolean;
+    isSetupSeeded: boolean;
+  };
+}
+
+export interface BusinessCategory {
+  id: string;
+  businessId: string;
+  kind: BusinessCategoryKind;
+  name: string;
+  normalizedName: string;
+  isDefault: boolean;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProductService {
+  id: string;
+  businessId: string;
+  categoryId?: string | null;
+  name: string;
+  normalizedName: string;
+  type: ProductServiceType;
+  defaultPrice?: number | null;
+  estimatedCost?: number | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+  category?: BusinessCategory | null;
+}
+
+export interface Customer {
+  id: string;
+  businessId: string;
+  name: string;
+  normalizedName: string;
+  phoneNumber?: string | null;
+  notes?: string | null;
+  openingReceivable: number;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Supplier {
+  id: string;
+  businessId: string;
+  name: string;
+  normalizedName: string;
+  phoneNumber?: string | null;
+  supplyType?: string | null;
+  notes?: string | null;
+  openingPayable: number;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LedgerAccount {
+  id: string;
+  businessId: string;
+  code: string;
+  name: string;
+  normalizedName: string;
+  accountType: 'asset' | 'liability' | 'equity' | 'income' | 'expense';
+  isSystemDefault: boolean;
+  isActive: boolean;
+  parentId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LedgerJournalEntryLine {
+  id: string;
+  accountId: string;
+  debitAmount: number;
+  creditAmount: number;
+  memo?: string | null;
+  account: {
+    id: string;
+    code: string;
+    name: string;
+    accountType: 'asset' | 'liability' | 'equity' | 'income' | 'expense';
+  };
+}
+
+export interface LedgerJournalEntry {
+  id: string;
+  businessId: string;
+  transactionId?: string | null;
+  entryDate: string;
+  description?: string | null;
+  status: 'draft' | 'posted' | 'needs_review' | 'void';
+  source: string;
+  createdByUserId?: string | null;
+  approvedByUserId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  transaction?: {
+    id: string;
+    type: 'revenue' | 'expense';
+    eventType:
+      | 'cash_sale'
+      | 'momo_sale'
+      | 'credit_sale'
+      | 'debtor_recovery'
+      | 'stock_purchase'
+      | 'operating_expense'
+      | 'owner_withdrawal'
+      | 'loan_received'
+      | 'loan_repayment'
+      | 'supplier_credit'
+      | 'capital_introduced'
+      | 'other';
+    amount: number;
+    date: string;
+    ledgerPostingStatus: 'not_configured' | 'pending' | 'posted' | 'failed' | 'skipped';
+  } | null;
+  lines: LedgerJournalEntryLine[];
+}
+
+export interface CreateLedgerAccountPayload {
+  code: string;
+  name: string;
+  accountType: 'asset' | 'liability' | 'equity' | 'income' | 'expense';
+  parentId?: string | null;
+}
+
+export interface CreateManualJournalEntryPayload {
+  entryDate?: string;
+  description?: string | null;
+  lines: Array<{
+    accountId: string;
+    debitAmount?: number;
+    creditAmount?: number;
+    memo?: string | null;
+  }>;
+}
+
+export interface BalanceSheetSectionLine {
+  accountId: string;
+  code: string;
+  name: string;
+  accountType: 'asset' | 'liability' | 'equity' | 'income' | 'expense';
+  balance: number;
+}
+
+export interface BalanceSheetSnapshot {
+  asOf: string;
+  assets: {
+    lines: BalanceSheetSectionLine[];
+    total: number;
+  };
+  liabilities: {
+    lines: BalanceSheetSectionLine[];
+    total: number;
+  };
+  equity: {
+    lines: BalanceSheetSectionLine[];
+    total: number;
+  };
+  currentEarnings: {
+    balance: number;
+  };
+  totals: {
+    assets: number;
+    liabilities: number;
+    equityBeforeEarnings: number;
+    equityAfterEarnings: number;
+    liabilitiesAndEquity: number;
+  };
+}
+
+export interface ReconciliationSession {
+  id: string;
+  businessId: string;
+  createdByUserId: string;
+  channel: 'cash' | 'momo';
+  asOf: string;
+  bookBalance: number;
+  countedBalance: number;
+  variance: number;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  createdByUser: {
+    id: string;
+    name: string;
+    fullName?: string | null;
+  };
+}
+
+export interface PendingTransactionApproval {
+  id: string;
+  transactionId: string;
+  status: 'pending' | 'approved' | 'rejected';
+  reason?: string | null;
+  note?: string | null;
+  requestedAt: string;
+  reviewedAt?: string | null;
+  transaction: Transaction;
+  requestedByUser?: {
+    id: string;
+    name: string;
+    fullName?: string | null;
+  } | null;
+}
+
 export interface AuthTokens {
   accessToken: string;
   refreshToken: string;
@@ -441,4 +714,4 @@ export interface PremiumInsight {
   icon: string;
 }
 
-export type AppView = 'landing' | 'auth' | 'onboarding' | 'chat' | 'attach' | 'dashboard' | 'reports' | 'history' | 'settings' | 'admin';
+export type AppView = 'landing' | 'auth' | 'onboarding' | 'chat' | 'attach' | 'dashboard' | 'reports' | 'history' | 'settings' | 'approvals' | 'admin';

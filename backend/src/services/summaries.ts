@@ -25,6 +25,18 @@ export interface SummaryPayload {
   indirectExpenseBreakdown: Record<string, number>;
   dailyBreakdown: Array<{ date: string; revenue: number; expenses: number }>;
   cashFlow: CashFlowSummary;
+  completeness: {
+    totalRecords: number;
+    assignedSalesCount: number;
+    unassignedSalesCount: number;
+    assignedSalesAmount: number;
+    unassignedSalesAmount: number;
+    productAssignmentRatio: number;
+    lowConfidenceCount: number;
+    mediumConfidenceCount: number;
+    reviewFlaggedCount: number;
+    completenessScore: number;
+  };
 }
 
 const normalizeDateKey = (date: Date): string => date.toISOString().slice(0, 10);
@@ -66,6 +78,13 @@ export function computeSummary(transactions: Transaction[]): SummaryPayload {
   let indirectExpenses = 0;
   let nonBusinessExpenses = 0;
   const transactionCount = transactions.length;
+  let assignedSalesCount = 0;
+  let unassignedSalesCount = 0;
+  let assignedSalesAmount = 0;
+  let unassignedSalesAmount = 0;
+  let lowConfidenceCount = 0;
+  let mediumConfidenceCount = 0;
+  let reviewFlaggedCount = 0;
 
   const categoryBreakdown: Record<string, { revenue: number; expense: number; total: number }> = {};
   const directExpenseBreakdown: Record<string, number> = {};
@@ -82,6 +101,10 @@ export function computeSummary(transactions: Transaction[]): SummaryPayload {
   };
 
   for (const transaction of transactions) {
+    if (transaction.parseConfidence === 'low') lowConfidenceCount += 1;
+    if (transaction.parseConfidence === 'medium') mediumConfidenceCount += 1;
+    if (transaction.requiresReview) reviewFlaggedCount += 1;
+
     const category = transaction.type === 'revenue'
       ? resolveRevenueCategory(transaction)
       : (transaction.category ?? 'Uncategorized');
@@ -90,6 +113,18 @@ export function computeSummary(transactions: Transaction[]): SummaryPayload {
     }
 
     if (transaction.type === 'revenue') {
+      if (transaction.productServiceId) {
+        assignedSalesCount += 1;
+        assignedSalesAmount += transaction.amount;
+      } else if (
+        transaction.eventType === 'cash_sale'
+        || transaction.eventType === 'momo_sale'
+        || transaction.eventType === 'credit_sale'
+      ) {
+        unassignedSalesCount += 1;
+        unassignedSalesAmount += transaction.amount;
+      }
+
       categoryBreakdown[category].revenue += transaction.amount;
       categoryBreakdown[category].total += transaction.amount;
 
@@ -142,6 +177,13 @@ export function computeSummary(transactions: Transaction[]): SummaryPayload {
   const totalExpenses = directExpenses + indirectExpenses;
   const grossProfit = totalRevenue - directExpenses;
   const netProfit = grossProfit - indirectExpenses;
+  const salesAssignmentBase = assignedSalesCount + unassignedSalesCount;
+  const productAssignmentRatio = salesAssignmentBase > 0 ? assignedSalesCount / salesAssignmentBase : 1;
+  const confidencePenalty = transactionCount > 0 ? (lowConfidenceCount + reviewFlaggedCount) / transactionCount : 0;
+  const completenessScore = Math.max(
+    0,
+    Math.min(1, (productAssignmentRatio * 0.7) + ((1 - confidencePenalty) * 0.3))
+  );
 
   const dailyBreakdown = Object.entries(dailyMap)
     .sort(([a], [b]) => a.localeCompare(b))
@@ -161,6 +203,18 @@ export function computeSummary(transactions: Transaction[]): SummaryPayload {
     directExpenseBreakdown,
     indirectExpenseBreakdown,
     dailyBreakdown,
-    cashFlow
+    cashFlow,
+    completeness: {
+      totalRecords: transactionCount,
+      assignedSalesCount,
+      unassignedSalesCount,
+      assignedSalesAmount,
+      unassignedSalesAmount,
+      productAssignmentRatio,
+      lowConfidenceCount,
+      mediumConfidenceCount,
+      reviewFlaggedCount,
+      completenessScore
+    }
   };
 }

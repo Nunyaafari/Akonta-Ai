@@ -5,6 +5,19 @@ import type {
   AuthOtpRequestResponse,
   AuthSession,
   AuthVerifyResponse,
+  BusinessCategory,
+  BalanceSheetSnapshot,
+  BusinessPaymentMethod,
+  BusinessSettingsProfile,
+  CreateLedgerAccountPayload,
+  CreateManualJournalEntryPayload,
+  Customer,
+  LedgerAccount,
+  LedgerJournalEntry,
+  PendingTransactionApproval,
+  ReconciliationSession,
+  ProductService,
+  Supplier,
   Transaction,
   User,
   SummaryPayload,
@@ -82,6 +95,98 @@ const AUTH_SESSION_KEY = 'akonta_auth_session';
 const fallbackWorkspaceId = 'demo-workspace';
 const fallbackWorkspaceName = 'Demo Workspace';
 const fallbackWorkspaceMembers: WorkspaceMember[] = [];
+const fallbackBusinessCategories: BusinessCategory[] = [];
+const fallbackProductsServices: ProductService[] = [];
+const fallbackCustomers: Customer[] = [];
+const fallbackSuppliers: Supplier[] = [];
+const fallbackLedgerAccounts: LedgerAccount[] = [];
+const fallbackLedgerJournalEntries: LedgerJournalEntry[] = [];
+const fallbackReconciliationSessions: ReconciliationSession[] = [];
+const fallbackBalanceSheetSnapshot: BalanceSheetSnapshot = {
+  asOf: new Date().toISOString(),
+  assets: { lines: [], total: 0 },
+  liabilities: { lines: [], total: 0 },
+  equity: { lines: [], total: 0 },
+  currentEarnings: { balance: 0 },
+  totals: {
+    assets: 0,
+    liabilities: 0,
+    equityBeforeEarnings: 0,
+    equityAfterEarnings: 0,
+    liabilitiesAndEquity: 0
+  }
+};
+
+const buildFallbackOnboardingProfile = (profile: BusinessSettingsProfile): NonNullable<BusinessSettingsProfile['onboardingProfile']> => {
+  const hasBusinessName = Boolean(profile.businessName?.trim());
+  const hasBusinessType = Boolean(profile.businessType?.trim());
+  const hasCurrencyCode = Boolean(profile.currencyCode?.trim());
+  const hasTimezone = Boolean(profile.timezone?.trim());
+  const hasPaymentMethods = Array.isArray(profile.enabledPaymentMethods) && profile.enabledPaymentMethods.length > 0;
+  const requiredChecks = [hasBusinessName, hasBusinessType, hasCurrencyCode, hasTimezone, hasPaymentMethods];
+  const requiredCompleted = requiredChecks.filter(Boolean).length;
+  const requiredTotal = requiredChecks.length;
+  const requiredCompletionPercent = Math.round((requiredCompleted / requiredTotal) * 100);
+
+  const hasCategories = profile.setupCounts.categories > 0;
+  const hasProducts = profile.setupCounts.products > 0;
+  const hasCustomers = profile.setupCounts.customers > 0;
+  const hasSuppliers = profile.setupCounts.suppliers > 0;
+  const hasDefaultLedger = profile.setupCounts.ledgerAccounts > 0;
+  const setupChecks = [hasCategories, hasProducts, hasCustomers, hasSuppliers];
+  const setupCompleted = setupChecks.filter(Boolean).length;
+  const setupTotal = setupChecks.length;
+  const setupCompletionPercent = Math.round((setupCompleted / setupTotal) * 100);
+  const overallCompletionPercent = Math.round((requiredCompletionPercent * 0.7) + (setupCompletionPercent * 0.3));
+
+  return {
+    required: {
+      hasBusinessName,
+      hasBusinessType,
+      hasCurrencyCode,
+      hasTimezone,
+      hasPaymentMethods
+    },
+    setupModules: {
+      hasCategories,
+      hasProducts,
+      hasCustomers,
+      hasSuppliers,
+      hasDefaultLedger
+    },
+    completion: {
+      requiredCompleted,
+      requiredTotal,
+      requiredCompletionPercent,
+      setupCompleted,
+      setupTotal,
+      setupCompletionPercent,
+      overallCompletionPercent
+    },
+    isReadyForFirstRecord: requiredCompletionPercent === 100,
+    isSetupSeeded: hasDefaultLedger || hasCategories
+  };
+};
+
+let fallbackSettingsProfile: BusinessSettingsProfile = {
+  id: fallbackWorkspaceId,
+  businessName: fallbackWorkspaceName,
+  businessType: 'Trading / Retail',
+  currencyCode: 'GHS',
+  timezone: 'Africa/Accra',
+  enabledPaymentMethods: ['cash', 'momo'],
+  onboardingVersion: 2,
+  onboardingCompletedAt: null,
+  setupCounts: {
+    products: 0,
+    customers: 0,
+    suppliers: 0,
+    categories: 0,
+    ledgerAccounts: 14
+  },
+  onboardingProfile: undefined
+};
+fallbackSettingsProfile.onboardingProfile = buildFallbackOnboardingProfile(fallbackSettingsProfile);
 let refreshInFlight: Promise<boolean> | null = null;
 
 const readLegacyUserId = (): string | null => {
@@ -182,6 +287,20 @@ export const isOfflineSyncError = (error: unknown): error is OfflineSyncError =>
 
 export const registerDemoModeListener = (callback: () => void) => {
   demoModeCallback = callback;
+};
+
+const refreshFallbackSetupCounts = () => {
+  fallbackSettingsProfile = {
+    ...fallbackSettingsProfile,
+    setupCounts: {
+      ...fallbackSettingsProfile.setupCounts,
+      products: fallbackProductsServices.filter((entry) => entry.isActive).length,
+      customers: fallbackCustomers.filter((entry) => entry.isActive).length,
+      suppliers: fallbackSuppliers.filter((entry) => entry.isActive).length,
+      categories: fallbackBusinessCategories.filter((entry) => entry.isActive).length
+    }
+  };
+  fallbackSettingsProfile.onboardingProfile = buildFallbackOnboardingProfile(fallbackSettingsProfile);
 };
 
 const withStandardHeaders = (headers?: HeadersInit): Headers => {
@@ -408,6 +527,462 @@ const fallbackApi = async (path: string, init?: RequestInit) => {
     };
   }
 
+  if (path === '/api/settings/profile' && method === 'GET') {
+    refreshFallbackSetupCounts();
+    return fallbackSettingsProfile;
+  }
+
+  if (path === '/api/settings/profile' && method === 'PATCH') {
+    const nextPaymentMethods = Array.isArray(body.enabledPaymentMethods)
+      ? body.enabledPaymentMethods.filter((entry: unknown) => typeof entry === 'string') as BusinessPaymentMethod[]
+      : fallbackSettingsProfile.enabledPaymentMethods;
+
+    fallbackSettingsProfile = {
+      ...fallbackSettingsProfile,
+      businessName: typeof body.businessName === 'string' ? body.businessName : fallbackSettingsProfile.businessName,
+      businessType: body.businessType === undefined ? fallbackSettingsProfile.businessType : body.businessType,
+      currencyCode: typeof body.currencyCode === 'string' ? body.currencyCode : fallbackSettingsProfile.currencyCode,
+      timezone: typeof body.timezone === 'string' ? body.timezone : fallbackSettingsProfile.timezone,
+      enabledPaymentMethods: nextPaymentMethods,
+      onboardingCompletedAt: body.onboardingCompleted
+        ? new Date().toISOString()
+        : fallbackSettingsProfile.onboardingCompletedAt
+    };
+    fallbackSettingsProfile.onboardingProfile = buildFallbackOnboardingProfile(fallbackSettingsProfile);
+    return fallbackSettingsProfile;
+  }
+
+  if (path === '/api/settings/bootstrap-defaults' && method === 'POST') {
+    const now = new Date().toISOString();
+    const pushCategory = (kind: 'sales' | 'expense', name: string) => {
+      const normalized = name.toLowerCase();
+      const existing = fallbackBusinessCategories.find((entry) => entry.kind === kind && entry.normalizedName === normalized);
+      if (existing) return;
+      fallbackBusinessCategories.push({
+        id: `cat-${kind}-${normalized.replace(/\s+/g, '-')}`,
+        businessId: fallbackWorkspaceId,
+        kind,
+        name,
+        normalizedName: normalized,
+        isDefault: true,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now
+      });
+    };
+    pushCategory('sales', 'General sales');
+    pushCategory('expense', 'Operating expenses');
+    refreshFallbackSetupCounts();
+    return { success: true };
+  }
+
+  if (path === '/api/settings/categories' && method === 'GET') {
+    return fallbackBusinessCategories;
+  }
+
+  if (path === '/api/settings/categories' && method === 'POST') {
+    const now = new Date().toISOString();
+    const normalizedName = String(body.name ?? '').trim().toLowerCase();
+    const existing = fallbackBusinessCategories.find((entry) =>
+      entry.kind === body.kind && entry.normalizedName === normalizedName
+    );
+    if (existing) {
+      existing.name = String(body.name ?? existing.name);
+      existing.isActive = true;
+      existing.updatedAt = now;
+      refreshFallbackSetupCounts();
+      return existing;
+    }
+    const created: BusinessCategory = {
+      id: `cat-${Date.now()}`,
+      businessId: fallbackWorkspaceId,
+      kind: body.kind ?? 'expense',
+      name: String(body.name ?? 'Category'),
+      normalizedName,
+      isDefault: false,
+      isActive: true,
+      createdAt: now,
+      updatedAt: now
+    };
+    fallbackBusinessCategories.push(created);
+    refreshFallbackSetupCounts();
+    return created;
+  }
+
+  if (path.match(/^\/api\/settings\/categories\/[^/]+$/) && method === 'PATCH') {
+    const now = new Date().toISOString();
+    const id = path.split('/').pop() as string;
+    const existing = fallbackBusinessCategories.find((entry) => entry.id === id);
+    if (!existing) throw new Error('Category not found');
+    if (body.kind !== undefined) existing.kind = body.kind;
+    if (body.name !== undefined) {
+      const normalizedName = String(body.name).trim().toLowerCase();
+      existing.name = String(body.name);
+      existing.normalizedName = normalizedName;
+    }
+    if (body.isActive !== undefined) existing.isActive = Boolean(body.isActive);
+    existing.updatedAt = now;
+    refreshFallbackSetupCounts();
+    return existing;
+  }
+
+  if (path.match(/^\/api\/settings\/categories\/[^/]+\/deactivate$/) && method === 'PATCH') {
+    const now = new Date().toISOString();
+    const segments = path.split('/');
+    const id = segments[segments.length - 2] as string;
+    const existing = fallbackBusinessCategories.find((entry) => entry.id === id);
+    if (!existing) throw new Error('Category not found');
+    existing.isActive = false;
+    existing.updatedAt = now;
+    refreshFallbackSetupCounts();
+    return existing;
+  }
+
+  if (path === '/api/settings/products-services' && method === 'GET') {
+    return fallbackProductsServices;
+  }
+
+  if (path === '/api/settings/products-services' && method === 'POST') {
+    const now = new Date().toISOString();
+    const normalizedName = String(body.name ?? '').trim().toLowerCase();
+    const existing = fallbackProductsServices.find((entry) => entry.normalizedName === normalizedName);
+    if (existing) {
+      existing.name = String(body.name ?? existing.name);
+      existing.type = body.type ?? existing.type;
+      existing.defaultPrice = body.defaultPrice ?? existing.defaultPrice;
+      existing.estimatedCost = body.estimatedCost ?? existing.estimatedCost;
+      existing.categoryId = body.categoryId ?? existing.categoryId ?? null;
+      existing.isActive = true;
+      existing.updatedAt = now;
+      refreshFallbackSetupCounts();
+      return existing;
+    }
+    const category = fallbackBusinessCategories.find((entry) => entry.id === body.categoryId) ?? null;
+    const created: ProductService = {
+      id: `ps-${Date.now()}`,
+      businessId: fallbackWorkspaceId,
+      categoryId: body.categoryId ?? null,
+      name: String(body.name ?? 'Item'),
+      normalizedName,
+      type: body.type ?? 'product',
+      defaultPrice: body.defaultPrice ?? null,
+      estimatedCost: body.estimatedCost ?? null,
+      isActive: true,
+      createdAt: now,
+      updatedAt: now,
+      category
+    };
+    fallbackProductsServices.push(created);
+    refreshFallbackSetupCounts();
+    return created;
+  }
+
+  if (path.match(/^\/api\/settings\/products-services\/[^/]+$/) && method === 'PATCH') {
+    const now = new Date().toISOString();
+    const id = path.split('/').pop() as string;
+    const existing = fallbackProductsServices.find((entry) => entry.id === id);
+    if (!existing) throw new Error('Product/service not found');
+    if (body.name !== undefined) {
+      existing.name = String(body.name);
+      existing.normalizedName = String(body.name).trim().toLowerCase();
+    }
+    if (body.type !== undefined) existing.type = body.type;
+    if (body.defaultPrice !== undefined) existing.defaultPrice = body.defaultPrice;
+    if (body.estimatedCost !== undefined) existing.estimatedCost = body.estimatedCost;
+    if (body.categoryId !== undefined) existing.categoryId = body.categoryId;
+    if (body.isActive !== undefined) existing.isActive = Boolean(body.isActive);
+    existing.category = fallbackBusinessCategories.find((entry) => entry.id === existing.categoryId) ?? null;
+    existing.updatedAt = now;
+    refreshFallbackSetupCounts();
+    return existing;
+  }
+
+  if (path.match(/^\/api\/settings\/products-services\/[^/]+\/deactivate$/) && method === 'PATCH') {
+    const now = new Date().toISOString();
+    const segments = path.split('/');
+    const id = segments[segments.length - 2] as string;
+    const existing = fallbackProductsServices.find((entry) => entry.id === id);
+    if (!existing) throw new Error('Product/service not found');
+    existing.isActive = false;
+    existing.updatedAt = now;
+    refreshFallbackSetupCounts();
+    return existing;
+  }
+
+  if (path === '/api/settings/customers' && method === 'GET') {
+    return fallbackCustomers;
+  }
+
+  if (path === '/api/settings/customers' && method === 'POST') {
+    const now = new Date().toISOString();
+    const normalizedName = String(body.name ?? '').trim().toLowerCase();
+    const existing = fallbackCustomers.find((entry) => entry.normalizedName === normalizedName);
+    if (existing) {
+      existing.name = String(body.name ?? existing.name);
+      existing.phoneNumber = body.phoneNumber ?? existing.phoneNumber ?? null;
+      existing.notes = body.notes ?? existing.notes ?? null;
+      existing.openingReceivable = Number(body.openingReceivable ?? existing.openingReceivable ?? 0);
+      existing.isActive = true;
+      existing.updatedAt = now;
+      refreshFallbackSetupCounts();
+      return existing;
+    }
+    const created: Customer = {
+      id: `cust-${Date.now()}`,
+      businessId: fallbackWorkspaceId,
+      name: String(body.name ?? 'Customer'),
+      normalizedName,
+      phoneNumber: body.phoneNumber ?? null,
+      notes: body.notes ?? null,
+      openingReceivable: Number(body.openingReceivable ?? 0),
+      isActive: true,
+      createdAt: now,
+      updatedAt: now
+    };
+    fallbackCustomers.push(created);
+    refreshFallbackSetupCounts();
+    return created;
+  }
+
+  if (path.match(/^\/api\/settings\/customers\/[^/]+$/) && method === 'PATCH') {
+    const now = new Date().toISOString();
+    const id = path.split('/').pop() as string;
+    const existing = fallbackCustomers.find((entry) => entry.id === id);
+    if (!existing) throw new Error('Customer not found');
+    if (body.name !== undefined) {
+      existing.name = String(body.name);
+      existing.normalizedName = String(body.name).trim().toLowerCase();
+    }
+    if (body.phoneNumber !== undefined) existing.phoneNumber = body.phoneNumber;
+    if (body.notes !== undefined) existing.notes = body.notes;
+    if (body.openingReceivable !== undefined) existing.openingReceivable = Number(body.openingReceivable ?? 0);
+    if (body.isActive !== undefined) existing.isActive = Boolean(body.isActive);
+    existing.updatedAt = now;
+    refreshFallbackSetupCounts();
+    return existing;
+  }
+
+  if (path.match(/^\/api\/settings\/customers\/[^/]+\/deactivate$/) && method === 'PATCH') {
+    const now = new Date().toISOString();
+    const segments = path.split('/');
+    const id = segments[segments.length - 2] as string;
+    const existing = fallbackCustomers.find((entry) => entry.id === id);
+    if (!existing) throw new Error('Customer not found');
+    existing.isActive = false;
+    existing.updatedAt = now;
+    refreshFallbackSetupCounts();
+    return existing;
+  }
+
+  if (path === '/api/settings/suppliers' && method === 'GET') {
+    return fallbackSuppliers;
+  }
+
+  if (path === '/api/settings/ledger-accounts' && method === 'GET') {
+    return fallbackLedgerAccounts;
+  }
+
+  if (path === '/api/settings/ledger-accounts' && method === 'POST') {
+    const now = new Date().toISOString();
+    const code = String(body.code ?? '').trim().toUpperCase();
+    const name = String(body.name ?? '').trim();
+    const accountType = (body.accountType ?? 'expense') as LedgerAccount['accountType'];
+    const parentId = typeof body.parentId === 'string' && body.parentId ? body.parentId : null;
+    const created: LedgerAccount = {
+      id: `ledger-${Date.now()}`,
+      businessId: fallbackWorkspaceId,
+      code,
+      name,
+      normalizedName: name.toLowerCase(),
+      accountType,
+      isSystemDefault: false,
+      isActive: true,
+      parentId,
+      createdAt: now,
+      updatedAt: now
+    };
+    fallbackLedgerAccounts.push(created);
+    return created;
+  }
+
+  if (path.match(/^\/api\/settings\/ledger-accounts\/[^/]+$/) && method === 'PATCH') {
+    const now = new Date().toISOString();
+    const id = path.split('/').pop() as string;
+    const existing = fallbackLedgerAccounts.find((entry) => entry.id === id);
+    if (!existing) throw new Error('Ledger account not found');
+    if (body.code !== undefined) existing.code = String(body.code).trim().toUpperCase();
+    if (body.name !== undefined) {
+      existing.name = String(body.name).trim();
+      existing.normalizedName = existing.name.toLowerCase();
+    }
+    if (body.parentId !== undefined) existing.parentId = body.parentId;
+    if (body.isActive !== undefined) existing.isActive = Boolean(body.isActive);
+    existing.updatedAt = now;
+    return existing;
+  }
+
+  if (path.match(/^\/api\/settings\/ledger-accounts\/[^/]+\/deactivate$/) && method === 'PATCH') {
+    const now = new Date().toISOString();
+    const segments = path.split('/');
+    const id = segments[segments.length - 2] as string;
+    const existing = fallbackLedgerAccounts.find((entry) => entry.id === id);
+    if (!existing) throw new Error('Ledger account not found');
+    existing.isActive = false;
+    existing.updatedAt = now;
+    return existing;
+  }
+
+  if (path === '/api/settings/journal-entries' && method === 'GET') {
+    return fallbackLedgerJournalEntries;
+  }
+
+  if (path === '/api/settings/journal-entries' && method === 'POST') {
+    const now = new Date().toISOString();
+    const entryId = `journal-${Date.now()}`;
+    const lines = Array.isArray(body.lines) ? body.lines : [];
+    const createdLines = lines.map((line: Record<string, unknown>, index: number): LedgerJournalEntry['lines'][number] => {
+      const accountId = String(line.accountId ?? '');
+      const account = fallbackLedgerAccounts.find((entry) => entry.id === accountId) ?? {
+        id: accountId,
+        code: '9999',
+        name: 'Unknown account',
+        accountType: 'expense' as const
+      };
+      return {
+        id: `${entryId}-line-${index + 1}`,
+        accountId: account.id,
+        debitAmount: Number(line.debitAmount ?? 0),
+        creditAmount: Number(line.creditAmount ?? 0),
+        memo: typeof line.memo === 'string' ? line.memo : null,
+        account: {
+          id: account.id,
+          code: account.code,
+          name: account.name,
+          accountType: account.accountType
+        }
+      };
+    });
+
+    const created: LedgerJournalEntry = {
+      id: entryId,
+      businessId: fallbackWorkspaceId,
+      transactionId: null,
+      entryDate: body.entryDate ?? now,
+      description: typeof body.description === 'string' ? body.description : null,
+      status: 'posted',
+      source: 'manual',
+      createdByUserId: 'demo-user',
+      approvedByUserId: null,
+      createdAt: now,
+      updatedAt: now,
+      transaction: null,
+      lines: createdLines
+    };
+    fallbackLedgerJournalEntries.unshift(created);
+    return created;
+  }
+
+  if (path.startsWith('/api/settings/balance-sheet') && method === 'GET') {
+    return fallbackBalanceSheetSnapshot;
+  }
+
+  if (path.startsWith('/api/settings/reconciliation-sessions') && method === 'GET') {
+    const url = new URL(path, 'http://fallback.local');
+    const channel = url.searchParams.get('channel');
+    const limit = Number(url.searchParams.get('limit') ?? 10);
+    const filtered = channel === 'cash' || channel === 'momo'
+      ? fallbackReconciliationSessions.filter((entry) => entry.channel === channel)
+      : fallbackReconciliationSessions;
+    return filtered.slice(0, limit);
+  }
+
+  if (path === '/api/settings/reconciliation-sessions' && method === 'POST') {
+    const created: ReconciliationSession = {
+      id: `recon-${Date.now()}`,
+      businessId: fallbackWorkspaceId,
+      createdByUserId: 'demo-user',
+      channel: body.channel ?? 'cash',
+      asOf: body.asOf ?? new Date().toISOString(),
+      bookBalance: Number(body.bookBalance ?? 0),
+      countedBalance: Number(body.countedBalance ?? 0),
+      variance: Number(body.countedBalance ?? 0) - Number(body.bookBalance ?? 0),
+      notes: body.notes ?? null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      createdByUser: {
+        id: 'demo-user',
+        name: 'Demo User',
+        fullName: 'Demo User'
+      }
+    };
+    fallbackReconciliationSessions.unshift(created);
+    return created;
+  }
+
+  if (path === '/api/settings/suppliers' && method === 'POST') {
+    const now = new Date().toISOString();
+    const normalizedName = String(body.name ?? '').trim().toLowerCase();
+    const existing = fallbackSuppliers.find((entry) => entry.normalizedName === normalizedName);
+    if (existing) {
+      existing.name = String(body.name ?? existing.name);
+      existing.phoneNumber = body.phoneNumber ?? existing.phoneNumber ?? null;
+      existing.supplyType = body.supplyType ?? existing.supplyType ?? null;
+      existing.notes = body.notes ?? existing.notes ?? null;
+      existing.openingPayable = Number(body.openingPayable ?? existing.openingPayable ?? 0);
+      existing.isActive = true;
+      existing.updatedAt = now;
+      refreshFallbackSetupCounts();
+      return existing;
+    }
+    const created: Supplier = {
+      id: `sup-${Date.now()}`,
+      businessId: fallbackWorkspaceId,
+      name: String(body.name ?? 'Supplier'),
+      normalizedName,
+      phoneNumber: body.phoneNumber ?? null,
+      supplyType: body.supplyType ?? null,
+      notes: body.notes ?? null,
+      openingPayable: Number(body.openingPayable ?? 0),
+      isActive: true,
+      createdAt: now,
+      updatedAt: now
+    };
+    fallbackSuppliers.push(created);
+    refreshFallbackSetupCounts();
+    return created;
+  }
+
+  if (path.match(/^\/api\/settings\/suppliers\/[^/]+$/) && method === 'PATCH') {
+    const now = new Date().toISOString();
+    const id = path.split('/').pop() as string;
+    const existing = fallbackSuppliers.find((entry) => entry.id === id);
+    if (!existing) throw new Error('Supplier not found');
+    if (body.name !== undefined) {
+      existing.name = String(body.name);
+      existing.normalizedName = String(body.name).trim().toLowerCase();
+    }
+    if (body.phoneNumber !== undefined) existing.phoneNumber = body.phoneNumber;
+    if (body.supplyType !== undefined) existing.supplyType = body.supplyType;
+    if (body.notes !== undefined) existing.notes = body.notes;
+    if (body.openingPayable !== undefined) existing.openingPayable = Number(body.openingPayable ?? 0);
+    if (body.isActive !== undefined) existing.isActive = Boolean(body.isActive);
+    existing.updatedAt = now;
+    refreshFallbackSetupCounts();
+    return existing;
+  }
+
+  if (path.match(/^\/api\/settings\/suppliers\/[^/]+\/deactivate$/) && method === 'PATCH') {
+    const now = new Date().toISOString();
+    const segments = path.split('/');
+    const id = segments[segments.length - 2] as string;
+    const existing = fallbackSuppliers.find((entry) => entry.id === id);
+    if (!existing) throw new Error('Supplier not found');
+    existing.isActive = false;
+    existing.updatedAt = now;
+    refreshFallbackSetupCounts();
+    return existing;
+  }
+
   if (path.match(/^\/api\/users\/[^/]+\/referrals$/) && method === 'GET') {
     const id = path.split('/')[3] as string;
     return mockGetReferralProgress(id);
@@ -552,7 +1127,9 @@ const fallbackApi = async (path: string, init?: RequestInit) => {
   throw new Error('No mock implementation for ' + method + ' ' + path);
 };
 
-export const createUser = async (user: Partial<User>): Promise<User> => {
+export const createUser = async (
+  user: Partial<User> & { paymentMethods?: BusinessPaymentMethod[] }
+): Promise<User> => {
   const created = await fetchJson<User>('/api/users', {
     method: 'POST',
     headers: jsonHeaders,
@@ -635,6 +1212,285 @@ export const updateUser = async (
   });
   setLegacyUserContext(user.id);
   return user;
+};
+
+export const getBusinessSettingsProfile = async (): Promise<BusinessSettingsProfile> => {
+  return fetchJson<BusinessSettingsProfile>('/api/settings/profile');
+};
+
+export const updateBusinessSettingsProfile = async (payload: {
+  businessName?: string;
+  businessType?: string | null;
+  currencyCode?: string;
+  timezone?: string | null;
+  enabledPaymentMethods?: BusinessPaymentMethod[] | null;
+  onboardingCompleted?: boolean;
+}): Promise<BusinessSettingsProfile> => {
+  return fetchJson<BusinessSettingsProfile>('/api/settings/profile', {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
+  });
+};
+
+export const bootstrapBusinessDefaults = async (): Promise<{ success: boolean }> => {
+  return fetchJson<{ success: boolean }>('/api/settings/bootstrap-defaults', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({})
+  });
+};
+
+export const getBusinessCategories = async (): Promise<BusinessCategory[]> => {
+  return fetchJson<BusinessCategory[]>('/api/settings/categories');
+};
+
+export const createBusinessCategory = async (payload: {
+  kind: 'sales' | 'expense';
+  name: string;
+}): Promise<BusinessCategory> => {
+  return fetchJson<BusinessCategory>('/api/settings/categories', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
+  });
+};
+
+export const updateBusinessCategory = async (id: string, payload: {
+  kind?: 'sales' | 'expense';
+  name?: string;
+  isActive?: boolean;
+}): Promise<BusinessCategory> => {
+  return fetchJson<BusinessCategory>(`/api/settings/categories/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
+  });
+};
+
+export const deactivateBusinessCategory = async (id: string): Promise<BusinessCategory> => {
+  return fetchJson<BusinessCategory>(`/api/settings/categories/${encodeURIComponent(id)}/deactivate`, {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify({})
+  });
+};
+
+export const getProductsServices = async (): Promise<ProductService[]> => {
+  return fetchJson<ProductService[]>('/api/settings/products-services');
+};
+
+export const createProductService = async (payload: {
+  name: string;
+  type: 'product' | 'service';
+  defaultPrice?: number | null;
+  estimatedCost?: number | null;
+  categoryId?: string | null;
+}): Promise<ProductService> => {
+  return fetchJson<ProductService>('/api/settings/products-services', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
+  });
+};
+
+export const updateProductService = async (id: string, payload: {
+  name?: string;
+  type?: 'product' | 'service';
+  defaultPrice?: number | null;
+  estimatedCost?: number | null;
+  categoryId?: string | null;
+  isActive?: boolean;
+}): Promise<ProductService> => {
+  return fetchJson<ProductService>(`/api/settings/products-services/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
+  });
+};
+
+export const deactivateProductService = async (id: string): Promise<ProductService> => {
+  return fetchJson<ProductService>(`/api/settings/products-services/${encodeURIComponent(id)}/deactivate`, {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify({})
+  });
+};
+
+export const getCustomers = async (): Promise<Customer[]> => {
+  return fetchJson<Customer[]>('/api/settings/customers');
+};
+
+export const createCustomer = async (payload: {
+  name: string;
+  phoneNumber?: string | null;
+  notes?: string | null;
+  openingReceivable?: number | null;
+}): Promise<Customer> => {
+  return fetchJson<Customer>('/api/settings/customers', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
+  });
+};
+
+export const updateCustomer = async (id: string, payload: {
+  name?: string;
+  phoneNumber?: string | null;
+  notes?: string | null;
+  openingReceivable?: number | null;
+  isActive?: boolean;
+}): Promise<Customer> => {
+  return fetchJson<Customer>(`/api/settings/customers/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
+  });
+};
+
+export const deactivateCustomer = async (id: string): Promise<Customer> => {
+  return fetchJson<Customer>(`/api/settings/customers/${encodeURIComponent(id)}/deactivate`, {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify({})
+  });
+};
+
+export const getSuppliers = async (): Promise<Supplier[]> => {
+  return fetchJson<Supplier[]>('/api/settings/suppliers');
+};
+
+export const getLedgerAccounts = async (): Promise<LedgerAccount[]> => {
+  return fetchJson<LedgerAccount[]>('/api/settings/ledger-accounts');
+};
+
+export const createLedgerAccount = async (payload: CreateLedgerAccountPayload): Promise<LedgerAccount> => {
+  return fetchJson<LedgerAccount>('/api/settings/ledger-accounts', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
+  });
+};
+
+export const updateLedgerAccount = async (id: string, payload: {
+  code?: string;
+  name?: string;
+  parentId?: string | null;
+  isActive?: boolean;
+}): Promise<LedgerAccount> => {
+  return fetchJson<LedgerAccount>(`/api/settings/ledger-accounts/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
+  });
+};
+
+export const deactivateLedgerAccount = async (id: string): Promise<LedgerAccount> => {
+  return fetchJson<LedgerAccount>(`/api/settings/ledger-accounts/${encodeURIComponent(id)}/deactivate`, {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify({})
+  });
+};
+
+export const getLedgerJournalEntries = async (): Promise<LedgerJournalEntry[]> => {
+  return fetchJson<LedgerJournalEntry[]>('/api/settings/journal-entries');
+};
+
+export const createManualJournalEntry = async (payload: CreateManualJournalEntryPayload): Promise<LedgerJournalEntry> => {
+  return fetchJson<LedgerJournalEntry>('/api/settings/journal-entries', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
+  });
+};
+
+export const getBalanceSheetSnapshot = async (asOf?: string): Promise<BalanceSheetSnapshot> => {
+  const search = new URLSearchParams();
+  if (asOf) search.set('asOf', asOf);
+  const path = search.toString()
+    ? `/api/settings/balance-sheet?${search.toString()}`
+    : '/api/settings/balance-sheet';
+  return fetchJson<BalanceSheetSnapshot>(path);
+};
+
+export const getReconciliationSessions = async (params?: {
+  channel?: 'cash' | 'momo';
+  limit?: number;
+}): Promise<ReconciliationSession[]> => {
+  const search = new URLSearchParams();
+  if (params?.channel) search.set('channel', params.channel);
+  if (params?.limit !== undefined) search.set('limit', String(params.limit));
+  const path = search.toString()
+    ? `/api/settings/reconciliation-sessions?${search.toString()}`
+    : '/api/settings/reconciliation-sessions';
+  return fetchJson<ReconciliationSession[]>(path);
+};
+
+export const createReconciliationSession = async (payload: {
+  channel: 'cash' | 'momo';
+  asOf?: string;
+  bookBalance: number;
+  countedBalance: number;
+  notes?: string | null;
+}): Promise<ReconciliationSession> => {
+  return fetchJson<ReconciliationSession>('/api/settings/reconciliation-sessions', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
+  });
+};
+
+export const getPendingApprovals = async (): Promise<PendingTransactionApproval[]> => {
+  return fetchJson<PendingTransactionApproval[]>('/api/transactions/approvals/pending');
+};
+
+export const reviewPendingApproval = async (
+  approvalId: string,
+  payload: { action: 'approve' | 'reject'; note?: string }
+): Promise<PendingTransactionApproval> => {
+  return fetchJson<PendingTransactionApproval>(`/api/transactions/approvals/${encodeURIComponent(approvalId)}/review`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
+  });
+};
+
+export const createSupplier = async (payload: {
+  name: string;
+  phoneNumber?: string | null;
+  supplyType?: string | null;
+  notes?: string | null;
+  openingPayable?: number | null;
+}): Promise<Supplier> => {
+  return fetchJson<Supplier>('/api/settings/suppliers', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
+  });
+};
+
+export const updateSupplier = async (id: string, payload: {
+  name?: string;
+  phoneNumber?: string | null;
+  supplyType?: string | null;
+  notes?: string | null;
+  openingPayable?: number | null;
+  isActive?: boolean;
+}): Promise<Supplier> => {
+  return fetchJson<Supplier>(`/api/settings/suppliers/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload)
+  });
+};
+
+export const deactivateSupplier = async (id: string): Promise<Supplier> => {
+  return fetchJson<Supplier>(`/api/settings/suppliers/${encodeURIComponent(id)}/deactivate`, {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify({})
+  });
 };
 
 export const getWorkspaces = async (): Promise<WorkspaceMembership[]> => {
@@ -1024,9 +1880,10 @@ export const updateTransaction = async (
     date?: string;
     category?: string | null;
     notes?: string | null;
+    requiresReview?: boolean;
     correctionReason?: string | null;
   }
-): Promise<Transaction> => {
+) : Promise<Transaction | { message: string; approvalId?: string; approvalStatus?: string }> => {
   return fetchJson<Transaction>(`/api/transactions/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: jsonHeaders,

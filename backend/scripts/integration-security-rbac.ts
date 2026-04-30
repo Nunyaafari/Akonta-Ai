@@ -30,9 +30,28 @@ const request = async <T>(params: {
   return { status: response.status, json, headers: response.headers };
 };
 
+const sleep = async (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const randomPhone = (seed: number): string => {
   const value = (seed % 10_000_000).toString().padStart(7, '0');
   return `23326${value}`;
+};
+
+const requestOtpWithRetry = async (phoneNumber: string, attempts = 3) => {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const otp = await request<RequestOtpResponse>({
+      method: 'POST',
+      path: '/api/auth/request-otp',
+      body: { phoneNumber }
+    });
+    if (otp.status === 200) return otp;
+    if (otp.status !== 429 || attempt === attempts) return otp;
+    const waitHeader = otp.headers.get('retry-after');
+    const waitSeconds = waitHeader ? Number(waitHeader) : 5;
+    await sleep((Number.isFinite(waitSeconds) ? waitSeconds : 5) * 1000);
+  }
+
+  throw new Error(`request-otp failed for ${phoneNumber}`);
 };
 
 interface BootstrapOwnerResponse {
@@ -77,11 +96,7 @@ const bootstrapOwner = async (params: { name: string; phoneNumber: string; busin
 };
 
 const loginByOtp = async (phoneNumber: string) => {
-  const otp = await request<RequestOtpResponse>({
-    method: 'POST',
-    path: '/api/auth/request-otp',
-    body: { phoneNumber }
-  });
+  const otp = await requestOtpWithRetry(phoneNumber);
   assert.equal(otp.status, 200, `request-otp failed for ${phoneNumber}`);
   assert.ok(
     otp.json.devOtpCode,

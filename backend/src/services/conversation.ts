@@ -1,7 +1,8 @@
 import { Prisma } from '@prisma/client';
 import type { ConversationChannel, Transaction } from '@prisma/client';
 import db from '../lib/db.js';
-import { parseWhatsAppEntry, type ParsedTransaction } from './parsing.js';
+import { config } from '../lib/env.js';
+import { interpretTransactionMessage, parseWhatsAppEntry, type ParsedTransaction } from './parsing.js';
 import { computeSummary } from './summaries.js';
 import { getBudgetsForPeriod, computeBudgetStatus } from './budgets.js';
 import { getMonthlyInsights } from './insights.js';
@@ -53,6 +54,22 @@ export interface ConversationResult {
   monthlySummary: ReturnType<typeof computeSummary>;
   budgetStatuses: ReturnType<typeof computeBudgetStatus>[];
 }
+
+const parseWithGuardrails = (message: string) => {
+  if (config.CLASSIFICATION_GUARDRAILS_V1_ENABLED) {
+    return interpretTransactionMessage(message);
+  }
+
+  return {
+    entries: parseWhatsAppEntry(message),
+    parseConfidence: 'high' as const,
+    requiresReview: false,
+    requiresConfirmation: false,
+    followUpQuestion: undefined,
+    reason: undefined,
+    calculation: undefined
+  };
+};
 
 const parseAmountFromText = (text: string): number | null => {
   const cleaned = text.replace(/,/g, '');
@@ -658,6 +675,10 @@ const upsertDraftTransaction = async (params: {
   date?: Date;
   category?: string;
   notes?: string;
+  rawInputText?: string;
+  parseConfidence?: 'high' | 'medium' | 'low';
+  requiresReview?: boolean;
+  interpretedFields?: Prisma.InputJsonValue;
 }): Promise<Transaction> => {
   if (params.transactionId) {
     const existing = await db.transaction.findUnique({ where: { id: params.transactionId } });
@@ -670,7 +691,14 @@ const upsertDraftTransaction = async (params: {
           amount: params.amount,
           date: params.date ?? existing.date,
           category: params.category ?? existing.category,
-          notes: params.notes ?? existing.notes
+          notes: params.notes ?? existing.notes,
+          rawInputText: params.rawInputText ?? existing.rawInputText,
+          parseConfidence: params.parseConfidence ?? existing.parseConfidence,
+          requiresReview: params.requiresReview ?? existing.requiresReview,
+          interpretedFields: params.interpretedFields
+            ?? (existing.interpretedFields === null
+              ? Prisma.JsonNull
+              : existing.interpretedFields as Prisma.InputJsonValue)
         }
       });
     }
@@ -689,6 +717,10 @@ const upsertDraftTransaction = async (params: {
       date: params.date ?? new Date(),
       category: params.category ?? null,
       notes: params.notes ?? null,
+      rawInputText: params.rawInputText ?? null,
+      parseConfidence: params.parseConfidence ?? 'high',
+      requiresReview: params.requiresReview ?? false,
+      interpretedFields: params.interpretedFields ?? Prisma.JsonNull,
       confirmedAt: null
     }
   });
@@ -944,11 +976,30 @@ export const processConversationMessage = async (
   }
 
   if (step === 'idle') {
-    const parsed = parseWhatsAppEntry(message);
-    const revenue = parsed.find((entry) => entry.type === 'revenue');
-    const expense = parsed.find((entry) => entry.type === 'expense');
+    const interpretation = parseWithGuardrails(message);
+    const revenue = interpretation.entries.find((entry) => entry.type === 'revenue');
+    const expense = interpretation.entries.find((entry) => entry.type === 'expense');
     const explicitSalesEvent = parseSalesEventTypeFromText(message, { allowNumericChoice: false });
     const explicitExpenseEvent = parseExpenseEventTypeFromText(message, { allowNumericChoice: false });
+
+    if (interpretation.followUpQuestion) {
+      const loggingIntent = isLoggingIntentMessage(message);
+      if (!loggingIntent) {
+        await db.conversationSession.update({
+          where: { id: session.id },
+          data: {
+            step: 'idle',
+            context: contextToJson(context)
+          }
+        });
+        return finalizeResult({
+          userId: params.userId,
+          botReply: interpretation.followUpQuestion,
+          step: 'idle',
+          touchedTransactions
+        });
+      }
+    }
 
     if (!revenue && !expense) {
       const idleReply = isAcknowledgementMessage(message)
@@ -1000,7 +1051,14 @@ export const processConversationMessage = async (
           ?? salesCategoryForCurrentDraft(context)
           ?? defaultRevenueCategory(salesEventType)
           ?? 'Cash sale',
-        notes: revenue.notes
+        notes: revenue.notes,
+        rawInputText: message,
+        parseConfidence: interpretation.parseConfidence,
+        requiresReview: interpretation.requiresReview,
+        interpretedFields: {
+          reason: interpretation.reason ?? null,
+          calculation: interpretation.calculation ?? null
+        } as Prisma.InputJsonValue
       });
       touchedTransactions.push(draftRevenue);
       context.salesTransactionId = draftRevenue.id;
@@ -1027,7 +1085,14 @@ export const processConversationMessage = async (
         amount: expense.amount,
         date: logDate,
         category: expenseCategory,
-        notes: expense.notes
+        notes: expense.notes,
+        rawInputText: message,
+        parseConfidence: interpretation.parseConfidence,
+        requiresReview: interpretation.requiresReview,
+        interpretedFields: {
+          reason: interpretation.reason ?? null,
+          calculation: interpretation.calculation ?? null
+        } as Prisma.InputJsonValue
       });
       touchedTransactions.push(draftExpense);
       context.expenseTransactionId = draftExpense.id;
@@ -1048,6 +1113,44 @@ export const processConversationMessage = async (
       return finalizeResult({
         userId: params.userId,
         botReply: `I noted the expense draft. ${buildInflowQuestionForLogDate(display, context.logDateKey)} Reply NO if there was no inflow.`,
+        step,
+        touchedTransactions
+      });
+    }
+
+    if (interpretation.requiresConfirmation && revenue && context.expenseAmount === undefined) {
+      step = 'await_confirm';
+      await db.conversationSession.update({
+        where: { id: session.id },
+        data: { step, context: contextToJson(context) }
+      });
+
+      const inferredTotal = interpretation.calculation?.inferredTotal;
+      const calcReply = inferredTotal !== undefined
+        ? `I calculated ${formatCurrencyForDisplay(inferredTotal, display)} from quantity × unit price.`
+        : 'I inferred this amount from your message.';
+
+      return finalizeResult({
+        userId: params.userId,
+        botReply: `${calcReply}\nPlease confirm before I post it.\n\nDraft:\n${buildDraftSummary(context, display)}\n\n${buildAwaitConfirmPrompt()}`,
+        step,
+        touchedTransactions
+      });
+    }
+
+    if (interpretation.requiresConfirmation && context.expenseAmount === undefined) {
+      step = 'await_confirm';
+      await db.conversationSession.update({
+        where: { id: session.id },
+        data: { step, context: contextToJson(context) }
+      });
+      const inferredTotal = interpretation.calculation?.inferredTotal;
+      const calcReply = inferredTotal !== undefined
+        ? `I calculated ${formatCurrencyForDisplay(inferredTotal, display)} from quantity × unit price.`
+        : 'I inferred this amount from your message.';
+      return finalizeResult({
+        userId: params.userId,
+        botReply: `${calcReply}\nPlease confirm before I post it.\n\nDraft:\n${buildDraftSummary(context, display)}\n\n${buildAwaitConfirmPrompt()}`,
         step,
         touchedTransactions
       });
@@ -1249,11 +1352,21 @@ export const processConversationMessage = async (
       });
     }
 
-    const parsedEntries = parseWhatsAppEntry(message);
+    const interpretation = parseWithGuardrails(message);
+    const parsedEntries = interpretation.entries;
     const parsedRevenue = parsedEntries.find((entry) => entry.type === 'revenue');
     const parsedExpense = parsedEntries.find((entry) => entry.type === 'expense');
     const explicitSalesEvent = parseSalesEventTypeFromText(message, { allowNumericChoice: false });
     const explicitExpenseEvent = parseExpenseEventTypeFromText(message, { allowNumericChoice: false });
+
+    if (interpretation.followUpQuestion && !parsedRevenue && !parsedExpense) {
+      return finalizeResult({
+        userId: params.userId,
+        botReply: interpretation.followUpQuestion,
+        step,
+        touchedTransactions
+      });
+    }
     const shouldTreatAsExpenseFirst = Boolean(
       (parsedExpense && !parsedRevenue)
       || (!parsedRevenue && explicitExpenseEvent && !explicitSalesEvent)
@@ -1283,7 +1396,14 @@ export const processConversationMessage = async (
         amount: expenseAmount,
         date: logDate,
         category: expenseCategory,
-        notes: parsedExpense?.notes
+        notes: parsedExpense?.notes,
+        rawInputText: message,
+        parseConfidence: interpretation.parseConfidence,
+        requiresReview: interpretation.requiresReview,
+        interpretedFields: {
+          reason: interpretation.reason ?? null,
+          calculation: interpretation.calculation ?? null
+        } as Prisma.InputJsonValue
       });
 
       touchedTransactions.push(draftExpense);
@@ -1358,7 +1478,14 @@ export const processConversationMessage = async (
         ?? salesCategoryForCurrentDraft(context)
         ?? defaultRevenueCategory(salesEventType)
         ?? 'Cash sale',
-      notes: parsedRevenue?.notes
+      notes: parsedRevenue?.notes,
+      rawInputText: message,
+      parseConfidence: interpretation.parseConfidence,
+      requiresReview: interpretation.requiresReview,
+      interpretedFields: {
+        reason: interpretation.reason ?? null,
+        calculation: interpretation.calculation ?? null
+      } as Prisma.InputJsonValue
     });
 
     touchedTransactions.push(draftRevenue);
@@ -1588,7 +1715,16 @@ export const processConversationMessage = async (
       });
     }
 
-    const parsed = parseWhatsAppEntry(message).find((entry) => entry.type === 'expense');
+    const interpretation = parseWithGuardrails(message);
+    if (interpretation.followUpQuestion && interpretation.entries.length === 0) {
+      return finalizeResult({
+        userId: params.userId,
+        botReply: interpretation.followUpQuestion,
+        step,
+        touchedTransactions
+      });
+    }
+    const parsed = interpretation.entries.find((entry) => entry.type === 'expense');
     const explicitExpenseEvent = parseExpenseEventTypeFromText(message, { allowNumericChoice: false });
     const expenseAmount = parsed?.amount ?? parseAmountFromText(message);
     if (expenseAmount === null || expenseAmount === undefined) {
@@ -1613,7 +1749,14 @@ export const processConversationMessage = async (
       amount: expenseAmount,
       date: logDate,
       category: expenseCategory,
-      notes: parsed?.notes
+      notes: parsed?.notes,
+      rawInputText: message,
+      parseConfidence: interpretation.parseConfidence,
+      requiresReview: interpretation.requiresReview,
+      interpretedFields: {
+        reason: interpretation.reason ?? null,
+        calculation: interpretation.calculation ?? null
+      } as Prisma.InputJsonValue
     });
 
     touchedTransactions.push(draftExpense);

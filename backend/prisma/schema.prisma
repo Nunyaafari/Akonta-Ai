@@ -131,6 +131,50 @@ enum DocumentType {
   other
 }
 
+enum ProductServiceType {
+  product
+  service
+}
+
+enum BusinessCategoryKind {
+  sales
+  expense
+}
+
+enum LedgerAccountType {
+  asset
+  liability
+  equity
+  income
+  expense
+}
+
+enum LedgerPostingStatus {
+  not_configured
+  pending
+  posted
+  failed
+  skipped
+}
+
+enum ParseConfidence {
+  high
+  medium
+  low
+}
+
+enum LedgerEntryStatus {
+  draft
+  posted
+  needs_review
+  void
+}
+
+enum ReconciliationChannel {
+  cash
+  momo
+}
+
 model User {
   id                           String               @id @default(cuid())
   name                         String
@@ -181,11 +225,17 @@ model User {
   requestedApprovals           TransactionApproval[] @relation("ApprovalRequester")
   reviewedApprovals            TransactionApproval[] @relation("ApprovalReviewer")
   sessions                     UserSession[]
+  reconciliationSessions       ReconciliationSession[]
 }
 
 model Business {
   id                     String                @id @default(cuid())
   businessName           String
+  businessType           String?
+  currencyCode           String                @default("GHS")
+  enabledPaymentMethods  Json?
+  onboardingVersion      Int                   @default(1)
+  onboardingCompletedAt  DateTime?
   ownerUserId            String
   primaryWhatsappUserId  String
   timezone               String                @default("Africa/Accra")
@@ -206,6 +256,13 @@ model Business {
   subscriptionGrants     SubscriptionGrant[]
   subscriptionPayments   SubscriptionPayment[]
   sessions               UserSession[]
+  categories             BusinessCategory[]
+  products               ProductService[]
+  customers              Customer[]
+  suppliers              Supplier[]
+  ledgerAccounts         LedgerAccount[]
+  journalEntries         LedgerJournalEntry[]
+  reconciliationSessions ReconciliationSession[]
 
   @@index([ownerUserId])
   @@index([primaryWhatsappUserId])
@@ -246,10 +303,19 @@ model Transaction {
   category         String?
   notes            String?
   correctionReason String?
+  rawInputText     String?
+  parseConfidence  ParseConfidence      @default(high)
+  requiresReview   Boolean              @default(false)
+  interpretedFields Json?
   correctionOfId   String?
+  customerId       String?
+  supplierId       String?
+  productServiceId String?
+  businessCategoryId String?
   correctionOf     Transaction?         @relation("TransactionCorrections", fields: [correctionOfId], references: [id])
   corrections      Transaction[]        @relation("TransactionCorrections")
   approvalStatus   ApprovalStatus       @default(not_required)
+  ledgerPostingStatus LedgerPostingStatus @default(not_configured)
   isDeleted        Boolean              @default(false)
   confirmedAt      DateTime?
   createdAt        DateTime             @default(now())
@@ -257,13 +323,174 @@ model Transaction {
   business         Business?            @relation(fields: [businessId], references: [id], onDelete: Cascade)
   createdByUser    User                 @relation("TransactionCreator", fields: [createdByUserId], references: [id])
   approvedByUser   User?                @relation("TransactionApprover", fields: [approvedByUserId], references: [id])
+  customer         Customer?            @relation(fields: [customerId], references: [id])
+  supplier         Supplier?            @relation(fields: [supplierId], references: [id])
+  productService   ProductService?      @relation(fields: [productServiceId], references: [id])
+  businessCategory BusinessCategory?    @relation(fields: [businessCategoryId], references: [id])
   approvals        TransactionApproval[]
   documents        Document[]
+  journalEntries   LedgerJournalEntry[]
 
   @@index([businessId, date])
   @@index([businessId, createdByUserId])
   @@index([businessId, approvalStatus])
   @@index([businessId, type])
+  @@index([businessId, customerId])
+  @@index([businessId, supplierId])
+  @@index([businessId, productServiceId])
+  @@index([businessId, businessCategoryId])
+}
+
+model BusinessCategory {
+  id             String               @id @default(cuid())
+  businessId     String
+  kind           BusinessCategoryKind
+  name           String
+  normalizedName String
+  isDefault      Boolean              @default(false)
+  isActive       Boolean              @default(true)
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  business       Business             @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  products       ProductService[]
+  transactions   Transaction[]
+
+  @@unique([businessId, kind, normalizedName])
+  @@index([businessId, kind, isActive])
+}
+
+model ProductService {
+  id             String             @id @default(cuid())
+  businessId     String
+  categoryId     String?
+  name           String
+  normalizedName String
+  type           ProductServiceType @default(product)
+  defaultPrice   Float?
+  estimatedCost  Float?
+  isActive       Boolean            @default(true)
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  business       Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  category       BusinessCategory?  @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  transactions   Transaction[]
+
+  @@unique([businessId, normalizedName])
+  @@index([businessId, type, isActive])
+}
+
+model Customer {
+  id               String        @id @default(cuid())
+  businessId       String
+  name             String
+  normalizedName   String
+  phoneNumber      String?
+  notes            String?
+  openingReceivable Float        @default(0)
+  isActive         Boolean       @default(true)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  business         Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  transactions     Transaction[]
+
+  @@unique([businessId, normalizedName])
+  @@index([businessId, isActive])
+}
+
+model Supplier {
+  id             String      @id @default(cuid())
+  businessId     String
+  name           String
+  normalizedName String
+  phoneNumber    String?
+  supplyType     String?
+  notes          String?
+  openingPayable Float       @default(0)
+  isActive       Boolean     @default(true)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  business       Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  transactions   Transaction[]
+
+  @@unique([businessId, normalizedName])
+  @@index([businessId, isActive])
+}
+
+model LedgerAccount {
+  id             String            @id @default(cuid())
+  businessId     String
+  code           String
+  name           String
+  normalizedName String
+  accountType    LedgerAccountType
+  isSystemDefault Boolean          @default(false)
+  isActive       Boolean           @default(true)
+  parentId       String?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  business       Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  parent         LedgerAccount?    @relation("LedgerAccountHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children       LedgerAccount[]   @relation("LedgerAccountHierarchy")
+  journalLines   LedgerJournalLine[]
+
+  @@unique([businessId, code])
+  @@unique([businessId, normalizedName])
+  @@index([businessId, accountType, isActive])
+}
+
+model LedgerJournalEntry {
+  id                 String            @id @default(cuid())
+  businessId         String
+  transactionId      String?
+  entryDate          DateTime
+  description        String?
+  status             LedgerEntryStatus @default(draft)
+  source             String            @default("system")
+  createdByUserId    String?
+  approvedByUserId   String?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+  business           Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  transaction        Transaction?      @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+  lines              LedgerJournalLine[]
+
+  @@index([businessId, entryDate])
+  @@index([transactionId])
+}
+
+model LedgerJournalLine {
+  id          String           @id @default(cuid())
+  entryId     String
+  accountId   String
+  debitAmount Float            @default(0)
+  creditAmount Float           @default(0)
+  memo        String?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  entry       LedgerJournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  account     LedgerAccount    @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@index([entryId])
+  @@index([accountId])
+}
+
+model ReconciliationSession {
+  id             String                @id @default(cuid())
+  businessId     String
+  createdByUserId String
+  channel        ReconciliationChannel
+  asOf           DateTime
+  bookBalance    Float
+  countedBalance Float
+  variance       Float
+  notes          String?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+  business       Business              @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdByUser  User                  @relation(fields: [createdByUserId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, channel, asOf])
+  @@index([createdByUserId])
 }
 
 model TransactionApproval {

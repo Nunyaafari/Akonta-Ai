@@ -84,10 +84,28 @@ export const createSummaryFromTransactions = (transactions: Transaction[]): Summ
     totalCashInflow: 0, totalCashOutflow: 0, netCashFlow: 0
   };
   let totalRevenue = 0, directExpenses = 0, indirectExpenses = 0, nonBusinessExpenses = 0;
+  let assignedSalesCount = 0;
+  let unassignedSalesCount = 0;
+  let assignedSalesAmount = 0;
+  let unassignedSalesAmount = 0;
+  let lowConfidenceCount = 0;
+  let mediumConfidenceCount = 0;
+  let reviewFlaggedCount = 0;
 
   transactions.forEach((tx) => {
+    if (tx.parseConfidence === 'low') lowConfidenceCount += 1;
+    if (tx.parseConfidence === 'medium') mediumConfidenceCount += 1;
+    if (tx.requiresReview) reviewFlaggedCount += 1;
+
     if (tx.type === 'revenue') {
       totalRevenue += tx.amount;
+      if (tx.productServiceId) {
+        assignedSalesCount += 1;
+        assignedSalesAmount += tx.amount;
+      } else if (tx.eventType === 'cash_sale' || tx.eventType === 'momo_sale' || tx.eventType === 'credit_sale') {
+        unassignedSalesCount += 1;
+        unassignedSalesAmount += tx.amount;
+      }
       if (tx.eventType === 'capital_introduced' || tx.eventType === 'loan_received') {
         cashFlow.financingInflow += tx.amount;
       } else if (tx.eventType !== 'credit_sale') {
@@ -135,6 +153,10 @@ export const createSummaryFromTransactions = (transactions: Transaction[]): Summ
   const totalExpenses = directExpenses + indirectExpenses;
   const grossProfit = totalRevenue - directExpenses;
   const netProfit = grossProfit - indirectExpenses;
+  const salesAssignmentBase = assignedSalesCount + unassignedSalesCount;
+  const productAssignmentRatio = salesAssignmentBase > 0 ? assignedSalesCount / salesAssignmentBase : 1;
+  const confidencePenalty = transactions.length > 0 ? (lowConfidenceCount + reviewFlaggedCount) / transactions.length : 0;
+  const completenessScore = Math.max(0, Math.min(1, (productAssignmentRatio * 0.7) + ((1 - confidencePenalty) * 0.3)));
 
   return {
     totalRevenue, totalExpenses, directExpenses, indirectExpenses, nonBusinessExpenses,
@@ -142,7 +164,19 @@ export const createSummaryFromTransactions = (transactions: Transaction[]): Summ
     categoryBreakdown, directExpenseBreakdown, indirectExpenseBreakdown,
     dailyBreakdown: Object.entries(dailyMap).sort(([a], [b]) => a.localeCompare(b))
       .map(([date, values]) => ({ date, revenue: values.revenue, expenses: values.expenses })),
-    cashFlow
+    cashFlow,
+    completeness: {
+      totalRecords: transactions.length,
+      assignedSalesCount,
+      unassignedSalesCount,
+      assignedSalesAmount,
+      unassignedSalesAmount,
+      productAssignmentRatio,
+      lowConfidenceCount,
+      mediumConfidenceCount,
+      reviewFlaggedCount,
+      completenessScore
+    }
   };
 };
 

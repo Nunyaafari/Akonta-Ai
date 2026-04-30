@@ -3,6 +3,16 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AppView,
   AuthSession,
+  BusinessCategory,
+  BalanceSheetSnapshot,
+  BusinessPaymentMethod,
+  BusinessSettingsProfile,
+  Customer,
+  LedgerAccount,
+  LedgerJournalEntry,
+  PendingTransactionApproval,
+  ProductService,
+  Supplier,
   User,
   ChatMessage,
   Transaction,
@@ -10,6 +20,7 @@ import {
   WhatsAppProvider,
   Budget,
   BudgetTargetType,
+  ReconciliationSession,
   MonthlyInsights,
   AdminPaymentSettings,
   AdminWhatsAppSettings,
@@ -29,9 +40,26 @@ import {
 import SalesProfitTrendChart, { type SalesProfitTrendPoint } from './components/SalesProfitTrendChart';
 import {
   activateUserSubscription,
+  bootstrapBusinessDefaults,
   clearStoredAuthSession,
+  createBusinessCategory,
+  createCustomer,
+  deactivateLedgerAccount,
+  createLedgerAccount,
+  createManualJournalEntry,
+  createProductService,
+  createSupplier,
   createUser,
+  getBusinessCategories,
+  getBusinessSettingsProfile,
+  getCustomers,
+  getLedgerAccounts,
+  getBalanceSheetSnapshot,
+  getLedgerJournalEntries,
+  getReconciliationSessions,
   getStoredAuthSession,
+  getProductsServices,
+  getSuppliers,
   getAdminAnalytics,
   getAdminPaymentSettings,
   getAdminWhatsAppProvider,
@@ -39,6 +67,7 @@ import {
   getCurrentInsights,
   getMonthlyInsights,
   getMonthlySummary,
+  getPendingApprovals,
   getReferralProgress,
   getTelegramProviderStatus,
   getTransactions,
@@ -49,11 +78,16 @@ import {
   postBudget,
   postChatEntry,
   registerDemoModeListener,
+  createReconciliationSession,
+  reviewPendingApproval,
   setAdminPaymentSettings,
   setAdminWhatsAppProvider,
   setLegacyUserContext,
-  verifySubscriptionPayment,
+  updateLedgerAccount,
   updateUser,
+  verifySubscriptionPayment,
+  updateBusinessSettingsProfile,
+  updateTransaction,
   getWorkspaces,
   getWorkspaceMembers,
   inviteWorkspaceMember,
@@ -88,13 +122,26 @@ import {
 
 const brandMarkSrc = '/brand/akonta.svg';
 const appCopyrightNotice = `© ${new Date().getFullYear()} All rights reserved. Amagold Technologies Ltd.`;
-const supportedCurrencies = ['GHS', 'USD', 'NGN', 'KES', 'EUR', 'GBP'] as const;
 const PAID_SERVICE_GRACE_DAYS = 5;
 const planEquivalentLabel = {
   basic: 'Approx: NGN 1,500 • ZMW 100 • USD 4',
   premium: 'Approx: NGN 5,000 • ZMW 330 • USD 13'
 } as const;
 const ADMIN_COCKPIT_PATH = '/admin';
+const transactionEventOptions = [
+  { value: 'cash_sale', label: 'Cash sale' },
+  { value: 'momo_sale', label: 'MoMo sale' },
+  { value: 'credit_sale', label: 'Credit sale' },
+  { value: 'debtor_recovery', label: 'Debtor recovery' },
+  { value: 'stock_purchase', label: 'Stock purchase' },
+  { value: 'operating_expense', label: 'Operating expense' },
+  { value: 'owner_withdrawal', label: 'Owner withdrawal' },
+  { value: 'loan_received', label: 'Loan received' },
+  { value: 'loan_repayment', label: 'Loan repayment' },
+  { value: 'supplier_credit', label: 'Supplier credit' },
+  { value: 'capital_introduced', label: 'Capital introduced' },
+  { value: 'other', label: 'Other' }
+] as const;
 
 const isAdminCockpitPath = (pathname: string): boolean =>
   pathname === ADMIN_COCKPIT_PATH || pathname.startsWith(`${ADMIN_COCKPIT_PATH}/`);
@@ -141,6 +188,18 @@ const defaultWeeklySummary: SummaryPayload = {
     operatingInflow: currentWeekSummary.totalRevenue, operatingOutflow: currentWeekSummary.totalExpenses,
     financingInflow: 0, financingOutflow: 0, totalCashInflow: currentWeekSummary.totalRevenue,
     totalCashOutflow: currentWeekSummary.totalExpenses, netCashFlow: currentWeekSummary.profit
+  },
+  completeness: {
+    totalRecords: currentWeekSummary.transactionCount,
+    assignedSalesCount: 0,
+    unassignedSalesCount: 0,
+    assignedSalesAmount: 0,
+    unassignedSalesAmount: 0,
+    productAssignmentRatio: 1,
+    lowConfidenceCount: 0,
+    mediumConfidenceCount: 0,
+    reviewFlaggedCount: 0,
+    completenessScore: 1
   }
 };
 
@@ -151,11 +210,22 @@ const emptySummaryPayload: SummaryPayload = {
   cashFlow: {
     operatingInflow: 0, operatingOutflow: 0, financingInflow: 0, financingOutflow: 0,
     totalCashInflow: 0, totalCashOutflow: 0, netCashFlow: 0
+  },
+  completeness: {
+    totalRecords: 0,
+    assignedSalesCount: 0,
+    unassignedSalesCount: 0,
+    assignedSalesAmount: 0,
+    unassignedSalesAmount: 0,
+    productAssignmentRatio: 1,
+    lowConfidenceCount: 0,
+    mediumConfidenceCount: 0,
+    reviewFlaggedCount: 0,
+    completenessScore: 1
   }
 };
 
 type ChatEntryResult = Awaited<ReturnType<typeof postChatEntry>>;
-type UpdateUserPayload = Parameters<typeof updateUser>[1];
 type PostBudgetPayload = Parameters<typeof postBudget>[0];
 type ActivateSubscriptionPayload = Parameters<typeof activateUserSubscription>[1];
 
@@ -163,6 +233,7 @@ const toDateInputValue = (value: Date): string =>
   `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
 const INSTALL_PROMPT_DISMISS_KEY = 'akontaai-install-dismissed-at';
 const INSTALL_PROMPT_COOLDOWN_MS = 1000 * 60 * 60 * 24 * 3;
+const walkthroughSeenStorageKey = (userId: string) => `akontaai-walkthrough-seen-${userId}`;
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -308,8 +379,28 @@ export default function App() {
   const [historyEndDate, setHistoryEndDate] = useState('');
   const [historyTransactionTypeFilter, setHistoryTransactionTypeFilter] = useState<'all' | 'revenue' | 'expense'>('all');
   const [historyAttachmentFilter, setHistoryAttachmentFilter] = useState<'all' | 'with' | 'without'>('all');
-  const [settingsCurrencyCode, setSettingsCurrencyCode] = useState<'GHS' | 'USD' | 'NGN' | 'KES' | 'EUR' | 'GBP'>('GHS');
+  const [historyQualityFilter, setHistoryQualityFilter] = useState<'all' | 'flagged' | 'low_confidence' | 'needs_review'>('all');
+  const [historyReviewTarget, setHistoryReviewTarget] = useState<Transaction | null>(null);
+  const [historyReviewAmount, setHistoryReviewAmount] = useState('');
+  const [historyReviewDate, setHistoryReviewDate] = useState('');
+  const [historyReviewCategory, setHistoryReviewCategory] = useState('');
+  const [historyReviewNotes, setHistoryReviewNotes] = useState('');
+  const [historyReviewEventType, setHistoryReviewEventType] = useState<Transaction['eventType']>('other');
+  const [focusedJournalEntryId, setFocusedJournalEntryId] = useState<string | null>(null);
+  const [reconciliationAsOfDate, setReconciliationAsOfDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [cashActualBalanceInput, setCashActualBalanceInput] = useState('');
+  const [cashReconciliationNotes, setCashReconciliationNotes] = useState('');
+  const [momoActualBalanceInput, setMomoActualBalanceInput] = useState('');
+  const [momoReconciliationNotes, setMomoReconciliationNotes] = useState('');
   const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
+  const [walkthroughStage, setWalkthroughStage] = useState<'idle' | 'awaiting_opt_in' | 'awaiting_channel_help' | 'done'>('idle');
+  const [settingsSection, setSettingsSection] = useState<'profile' | 'categories' | 'products' | 'customers' | 'suppliers' | 'ledger' | 'team' | 'advanced'>('profile');
+  const [settingsBusinessName, setSettingsBusinessName] = useState('');
+  const [settingsBusinessType, setSettingsBusinessType] = useState('');
+  const [settingsCurrencyCode, setSettingsCurrencyCode] = useState<'GHS' | 'USD' | 'NGN' | 'KES' | 'EUR' | 'GBP'>('GHS');
+  const [settingsTimezone, setSettingsTimezone] = useState('Africa/Accra');
+  const [settingsPreferredTime, setSettingsPreferredTime] = useState<'morning' | 'afternoon' | 'evening'>('evening');
+  const [settingsPaymentMethods, setSettingsPaymentMethods] = useState<BusinessPaymentMethod[]>(['cash', 'momo']);
   const [teamNotice, setTeamNotice] = useState<string | null>(null);
   const [teamInviteName, setTeamInviteName] = useState('');
   const [teamInvitePhone, setTeamInvitePhone] = useState('');
@@ -318,6 +409,40 @@ export default function App() {
   const [teamRoleDrafts, setTeamRoleDrafts] = useState<Record<string, WorkspaceRole>>({});
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [isOutboxSyncing, setIsOutboxSyncing] = useState(false);
+  const [setupCategoryKind, setSetupCategoryKind] = useState<'sales' | 'expense'>('expense');
+  const [setupCategoryName, setSetupCategoryName] = useState('');
+  const [setupProductName, setSetupProductName] = useState('');
+  const [setupProductType, setSetupProductType] = useState<'product' | 'service'>('product');
+  const [setupProductCategoryId, setSetupProductCategoryId] = useState<string>('');
+  const [setupProductDefaultPrice, setSetupProductDefaultPrice] = useState('');
+  const [setupProductEstimatedCost, setSetupProductEstimatedCost] = useState('');
+  const [setupCustomerName, setSetupCustomerName] = useState('');
+  const [setupCustomerPhone, setSetupCustomerPhone] = useState('');
+  const [setupCustomerOpening, setSetupCustomerOpening] = useState('');
+  const [setupSupplierName, setSetupSupplierName] = useState('');
+  const [setupSupplierPhone, setSetupSupplierPhone] = useState('');
+  const [setupSupplierType, setSetupSupplierType] = useState('');
+  const [setupSupplierOpening, setSetupSupplierOpening] = useState('');
+  const [customLedgerCode, setCustomLedgerCode] = useState('');
+  const [customLedgerName, setCustomLedgerName] = useState('');
+  const [customLedgerAccountType, setCustomLedgerAccountType] = useState<'asset' | 'liability' | 'equity' | 'income' | 'expense'>('expense');
+  const [customLedgerParentId, setCustomLedgerParentId] = useState('');
+  const [editingLedgerId, setEditingLedgerId] = useState<string | null>(null);
+  const [editingLedgerCode, setEditingLedgerCode] = useState('');
+  const [editingLedgerName, setEditingLedgerName] = useState('');
+  const [editingLedgerParentId, setEditingLedgerParentId] = useState('');
+  const [manualJournalDate, setManualJournalDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [manualJournalDescription, setManualJournalDescription] = useState('');
+  const [manualJournalLines, setManualJournalLines] = useState<Array<{
+    id: string;
+    accountId: string;
+    debitAmount: string;
+    creditAmount: string;
+    memo: string;
+  }>>([
+    { id: 'line-1', accountId: '', debitAmount: '', creditAmount: '', memo: '' },
+    { id: 'line-2', accountId: '', debitAmount: '', creditAmount: '', memo: '' }
+  ]);
 
   const activeCurrencyCode = user?.currencyCode ?? 'GHS';
   const isSuperAdmin = Boolean(user?.isSuperAdmin);
@@ -334,12 +459,16 @@ export default function App() {
     phoneNumber: string;
     businessName: string;
     businessType: string;
+    currencyCode: 'GHS' | 'USD' | 'NGN' | 'KES' | 'EUR' | 'GBP';
+    paymentMethods: BusinessPaymentMethod[];
     preferredTime: 'morning' | 'afternoon' | 'evening';
   }>({
     name: '',
     phoneNumber: '',
     businessName: '',
     businessType: '',
+    currencyCode: 'GHS',
+    paymentMethods: ['cash', 'momo'],
     preferredTime: 'evening'
   });
   const [onboardingReferralCode, setOnboardingReferralCode] = useState<string | null>(null);
@@ -347,14 +476,16 @@ export default function App() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
   const invalidateUserDataQueries = useCallback((userId: string, options?: { includeBudgets?: boolean }) => {
-    queryClient.invalidateQueries({ queryKey: ['transactions', userId] });
-    queryClient.invalidateQueries({ queryKey: ['weekly-summary', userId] });
-    queryClient.invalidateQueries({ queryKey: ['monthly-summary', userId] });
-    queryClient.invalidateQueries({ queryKey: ['current-insights', userId] });
+    queryClient.invalidateQueries({ queryKey: ['transactions'] });
+    queryClient.invalidateQueries({ queryKey: ['weekly-summary'] });
+    queryClient.invalidateQueries({ queryKey: ['monthly-summary'] });
+    queryClient.invalidateQueries({ queryKey: ['current-insights'] });
     queryClient.invalidateQueries({ queryKey: ['referrals', userId] });
-    queryClient.invalidateQueries({ queryKey: ['selected-report', userId] });
+    queryClient.invalidateQueries({ queryKey: ['selected-report'] });
+    queryClient.invalidateQueries({ queryKey: ['settings-journal-entries'] });
+    queryClient.invalidateQueries({ queryKey: ['settings-balance-sheet'] });
     if (options?.includeBudgets) {
-      queryClient.invalidateQueries({ queryKey: ['budgets', userId] });
+      queryClient.invalidateQueries({ queryKey: ['budgets'] });
     }
   }, [queryClient]);
 
@@ -370,8 +501,20 @@ export default function App() {
     }
   });
 
-  const updateUserMutation = useMutation({
-    mutationFn: (payload: { id: string; updates: UpdateUserPayload }) => updateUser(payload.id, payload.updates)
+  const reviewTransactionMutation = useMutation({
+    mutationFn: (payload: {
+      id: string;
+      updates: {
+        type?: 'revenue' | 'expense';
+        eventType?: Transaction['eventType'];
+        amount?: number;
+        date?: string;
+        category?: string | null;
+        notes?: string | null;
+        requiresReview?: boolean;
+        correctionReason?: string | null;
+      };
+    }) => updateTransaction(payload.id, payload.updates)
   });
 
   const createUserMutation = useMutation({
@@ -428,11 +571,9 @@ export default function App() {
   const isVerifyingOtp = verifyOtpMutation.isPending;
   const isSwitchingWorkspace = selectWorkspaceMutation.isPending;
   const isLoggingOut = logoutMutation.isPending;
-  const isSavingCurrency = updateUserMutation.isPending;
   const isSavingBudget = saveBudgetMutation.isPending;
   const isStartingCheckout = initializeSubscriptionMutation.isPending;
   const isActivatingPremium = activateSubscriptionMutation.isPending;
-  const isAnySettingsActionPending = isSavingCurrency || isSavingBudget || isStartingCheckout || isActivatingPremium;
 
   const currentPeriodContext = useMemo(() => {
     const now = new Date();
@@ -451,26 +592,26 @@ export default function App() {
   }, [user?.id]);
 
   const transactionsQuery = useQuery({
-    queryKey: ['transactions', user?.id],
-    enabled: Boolean(user?.id),
+    queryKey: ['transactions', authSession?.businessId, user?.id],
+    enabled: Boolean(user?.id && authSession?.businessId),
     queryFn: () => getTransactions(user!.id)
   });
 
   const weeklySummaryQuery = useQuery({
-    queryKey: ['weekly-summary', user?.id, currentPeriodContext.weekStart, currentPeriodContext.weekEnd],
-    enabled: Boolean(user?.id),
+    queryKey: ['weekly-summary', authSession?.businessId, user?.id, currentPeriodContext.weekStart, currentPeriodContext.weekEnd],
+    enabled: Boolean(user?.id && authSession?.businessId),
     queryFn: () => getWeeklySummary(user!.id, currentPeriodContext.weekStart, currentPeriodContext.weekEnd)
   });
 
   const monthlySummaryQuery = useQuery({
-    queryKey: ['monthly-summary', user?.id, currentPeriodContext.currentYear, currentPeriodContext.currentMonth],
-    enabled: Boolean(user?.id),
+    queryKey: ['monthly-summary', authSession?.businessId, user?.id, currentPeriodContext.currentYear, currentPeriodContext.currentMonth],
+    enabled: Boolean(user?.id && authSession?.businessId),
     queryFn: () => getMonthlySummary(user!.id, currentPeriodContext.currentYear, currentPeriodContext.currentMonth)
   });
 
   const currentInsightsQuery = useQuery({
-    queryKey: ['current-insights', user?.id, currentPeriodContext.currentYear, currentPeriodContext.currentMonth],
-    enabled: Boolean(user?.id),
+    queryKey: ['current-insights', authSession?.businessId, user?.id, currentPeriodContext.currentYear, currentPeriodContext.currentMonth],
+    enabled: Boolean(user?.id && authSession?.businessId),
     queryFn: () => getCurrentInsights(user!.id)
   });
 
@@ -481,14 +622,14 @@ export default function App() {
   });
 
   const budgetsQuery = useQuery({
-    queryKey: ['budgets', user?.id],
-    enabled: Boolean(user?.id),
+    queryKey: ['budgets', authSession?.businessId, user?.id],
+    enabled: Boolean(user?.id && authSession?.businessId),
     queryFn: () => getCurrentBudgets(user!.id)
   });
 
   const selectedReportDataQuery = useQuery({
-    queryKey: ['selected-report', user?.id, selectedReportYear, selectedReportMonth],
-    enabled: Boolean(user?.id) && reportMode === 'monthly',
+    queryKey: ['selected-report', authSession?.businessId, user?.id, selectedReportYear, selectedReportMonth],
+    enabled: Boolean(user?.id && authSession?.businessId) && reportMode === 'monthly',
     queryFn: async () => {
       const [monthly, insights] = await Promise.all([
         getMonthlySummary(user!.id, selectedReportYear, selectedReportMonth),
@@ -527,6 +668,71 @@ export default function App() {
     refetchOnWindowFocus: false
   });
 
+  const settingsProfileQuery = useQuery({
+    queryKey: ['settings-profile', authSession?.businessId],
+    enabled: Boolean(user?.id && authSession?.businessId),
+    queryFn: () => getBusinessSettingsProfile()
+  });
+
+  const settingsCategoriesQuery = useQuery({
+    queryKey: ['settings-categories', authSession?.businessId],
+    enabled: Boolean(user?.id && authSession?.businessId),
+    queryFn: () => getBusinessCategories()
+  });
+
+  const settingsProductsQuery = useQuery({
+    queryKey: ['settings-products-services', authSession?.businessId],
+    enabled: Boolean(user?.id && authSession?.businessId),
+    queryFn: () => getProductsServices()
+  });
+
+  const settingsCustomersQuery = useQuery({
+    queryKey: ['settings-customers', authSession?.businessId],
+    enabled: Boolean(user?.id && authSession?.businessId),
+    queryFn: () => getCustomers()
+  });
+
+  const settingsSuppliersQuery = useQuery({
+    queryKey: ['settings-suppliers', authSession?.businessId],
+    enabled: Boolean(user?.id && authSession?.businessId),
+    queryFn: () => getSuppliers()
+  });
+
+  const settingsLedgerAccountsQuery = useQuery({
+    queryKey: ['settings-ledger-accounts', authSession?.businessId],
+    enabled: Boolean(user?.id && authSession?.businessId),
+    queryFn: () => getLedgerAccounts()
+  });
+
+  const settingsJournalEntriesQuery = useQuery({
+    queryKey: ['settings-journal-entries', authSession?.businessId],
+    enabled: Boolean(user?.id && authSession?.businessId),
+    queryFn: () => getLedgerJournalEntries()
+  });
+
+  const settingsBalanceSheetQuery = useQuery({
+    queryKey: ['settings-balance-sheet', authSession?.businessId],
+    enabled: Boolean(user?.id && authSession?.businessId),
+    queryFn: () => getBalanceSheetSnapshot()
+  });
+
+  const reconciliationSessionsQuery = useQuery({
+    queryKey: ['settings-reconciliation-sessions', authSession?.businessId],
+    enabled: Boolean(user?.id && authSession?.businessId),
+    queryFn: () => getReconciliationSessions({ limit: 8 })
+  });
+
+  const canReviewApprovals = ['owner', 'manager', 'bookkeeper', 'accountant'].includes(
+    workspaceMembershipsQuery.data?.find((membership) => membership.status === 'active')?.role ?? ''
+  );
+
+  const pendingApprovalsQuery = useQuery({
+    queryKey: ['pending-approvals', authSession?.businessId],
+    enabled: Boolean(user?.id && authSession?.businessId && canReviewApprovals),
+    queryFn: () => getPendingApprovals(),
+    refetchOnWindowFocus: true
+  });
+
   const inviteWorkspaceMemberMutation = useMutation({
     mutationFn: (payload: {
       fullName: string;
@@ -550,6 +756,161 @@ export default function App() {
       queryClient.invalidateQueries({ queryKey: ['workspace-memberships', user?.id] });
     }
   });
+
+  const updateBusinessProfileMutation = useMutation({
+    mutationFn: (payload: Parameters<typeof updateBusinessSettingsProfile>[0]) => updateBusinessSettingsProfile(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings-profile', authSession?.businessId] });
+    }
+  });
+
+  const updateUserProfileMutation = useMutation({
+    mutationFn: (payload: { userId: string; updates: Parameters<typeof updateUser>[1] }) =>
+      updateUser(payload.userId, payload.updates)
+  });
+
+  const bootstrapDefaultsMutation = useMutation({
+    mutationFn: () => bootstrapBusinessDefaults(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings-categories', authSession?.businessId] });
+      queryClient.invalidateQueries({ queryKey: ['settings-profile', authSession?.businessId] });
+      queryClient.invalidateQueries({ queryKey: ['settings-ledger-accounts', authSession?.businessId] });
+      queryClient.invalidateQueries({ queryKey: ['settings-journal-entries', authSession?.businessId] });
+      queryClient.invalidateQueries({ queryKey: ['settings-balance-sheet', authSession?.businessId] });
+    }
+  });
+
+  const createCategoryMutation = useMutation({
+    mutationFn: (payload: { kind: 'sales' | 'expense'; name: string }) => createBusinessCategory(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings-categories', authSession?.businessId] });
+      queryClient.invalidateQueries({ queryKey: ['settings-profile', authSession?.businessId] });
+    }
+  });
+
+  const createProductMutation = useMutation({
+    mutationFn: (payload: {
+      name: string;
+      type: 'product' | 'service';
+      defaultPrice?: number | null;
+      estimatedCost?: number | null;
+      categoryId?: string | null;
+    }) => createProductService(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings-products-services', authSession?.businessId] });
+      queryClient.invalidateQueries({ queryKey: ['settings-profile', authSession?.businessId] });
+    }
+  });
+
+  const createCustomerMutation = useMutation({
+    mutationFn: (payload: { name: string; phoneNumber?: string | null; openingReceivable?: number | null }) =>
+      createCustomer(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings-customers', authSession?.businessId] });
+      queryClient.invalidateQueries({ queryKey: ['settings-profile', authSession?.businessId] });
+    }
+  });
+
+  const createSupplierMutation = useMutation({
+    mutationFn: (payload: {
+      name: string;
+      phoneNumber?: string | null;
+      supplyType?: string | null;
+      openingPayable?: number | null;
+    }) => createSupplier(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings-suppliers', authSession?.businessId] });
+      queryClient.invalidateQueries({ queryKey: ['settings-profile', authSession?.businessId] });
+    }
+  });
+
+  const createLedgerAccountMutation = useMutation({
+    mutationFn: (payload: {
+      code: string;
+      name: string;
+      accountType: 'asset' | 'liability' | 'equity' | 'income' | 'expense';
+      parentId?: string | null;
+    }) => createLedgerAccount(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings-ledger-accounts', authSession?.businessId] });
+      queryClient.invalidateQueries({ queryKey: ['settings-profile', authSession?.businessId] });
+    }
+  });
+
+  const updateLedgerAccountMutation = useMutation({
+    mutationFn: (payload: {
+      id: string;
+      updates: { code?: string; name?: string; parentId?: string | null; isActive?: boolean };
+    }) => updateLedgerAccount(payload.id, payload.updates),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings-ledger-accounts', authSession?.businessId] });
+    }
+  });
+
+  const deactivateLedgerAccountMutation = useMutation({
+    mutationFn: (ledgerId: string) => deactivateLedgerAccount(ledgerId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings-ledger-accounts', authSession?.businessId] });
+    }
+  });
+
+  const createManualJournalEntryMutation = useMutation({
+    mutationFn: (payload: {
+      entryDate?: string;
+      description?: string | null;
+      lines: Array<{ accountId: string; debitAmount?: number; creditAmount?: number; memo?: string | null }>;
+    }) => createManualJournalEntry(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings-journal-entries', authSession?.businessId] });
+      queryClient.invalidateQueries({ queryKey: ['settings-balance-sheet', authSession?.businessId] });
+    }
+  });
+
+  const createReconciliationSessionMutation = useMutation({
+    mutationFn: (payload: {
+      channel: 'cash' | 'momo';
+      asOf?: string;
+      bookBalance: number;
+      countedBalance: number;
+      notes?: string | null;
+    }) => createReconciliationSession(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings-reconciliation-sessions', authSession?.businessId] });
+    }
+  });
+
+  const reviewPendingApprovalMutation = useMutation({
+    mutationFn: (payload: { approvalId: string; action: 'approve' | 'reject'; note?: string }) =>
+      reviewPendingApproval(payload.approvalId, { action: payload.action, note: payload.note }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['pending-approvals', authSession?.businessId] });
+      queryClient.invalidateQueries({ queryKey: ['transactions', authSession?.businessId, user?.id] });
+      queryClient.invalidateQueries({ queryKey: ['settings-journal-entries', authSession?.businessId] });
+      queryClient.invalidateQueries({ queryKey: ['settings-balance-sheet', authSession?.businessId] });
+      if (user?.id) {
+        invalidateUserDataQueries(user.id, { includeBudgets: true });
+      }
+    }
+  });
+
+  const isAnySettingsActionPending =
+    isSavingBudget
+    || isStartingCheckout
+    || isActivatingPremium
+    || updateBusinessProfileMutation.isPending
+    || updateUserProfileMutation.isPending
+    || bootstrapDefaultsMutation.isPending
+    || createCategoryMutation.isPending
+    || createProductMutation.isPending
+    || createCustomerMutation.isPending
+    || createSupplierMutation.isPending
+    || createLedgerAccountMutation.isPending
+    || updateLedgerAccountMutation.isPending
+    || deactivateLedgerAccountMutation.isPending
+    || createManualJournalEntryMutation.isPending
+    || createReconciliationSessionMutation.isPending
+    || reviewPendingApprovalMutation.isPending
+    || reviewTransactionMutation.isPending;
 
   const adminAnalyticsQuery = useQuery({
     queryKey: ['admin-analytics', user?.id],
@@ -605,6 +966,16 @@ export default function App() {
   const workspaceMemberships = workspaceMembershipsQuery.data ?? [];
   const workspaceMembers = workspaceMembersQuery.data ?? [];
   const telegramStatus = telegramStatusQuery.data ?? null;
+  const settingsProfile = settingsProfileQuery.data ?? null;
+  const settingsCategories = settingsCategoriesQuery.data ?? [];
+  const settingsProducts = settingsProductsQuery.data ?? [];
+  const settingsCustomers = settingsCustomersQuery.data ?? [];
+  const settingsSuppliers = settingsSuppliersQuery.data ?? [];
+  const settingsLedgerAccounts = settingsLedgerAccountsQuery.data ?? [];
+  const settingsJournalEntries = settingsJournalEntriesQuery.data ?? [];
+  const settingsBalanceSheet = settingsBalanceSheetQuery.data ?? null;
+  const reconciliationSessions = reconciliationSessionsQuery.data ?? [];
+  const pendingApprovals = pendingApprovalsQuery.data ?? [];
   const adminAnalytics = adminAnalyticsQuery.data ?? null;
   const adminProviderInfo = adminProviderQuery.data ?? null;
   const adminPaymentSettings = adminPaymentSettingsQuery.data ?? null;
@@ -617,12 +988,232 @@ export default function App() {
       : null);
   const isAdminSaving = updateAdminProviderMutation.isPending || updateAdminPaymentMutation.isPending;
   const activeWorkspaceMembership = workspaceMemberships.find((membership) => membership.status === 'active') ?? null;
+  const pendingApprovalCount = pendingApprovals.length;
   const isWorkspacePremiumPlan = user?.subscriptionStatus === 'premium';
   const canManageWorkspaceMembers = activeWorkspaceMembership?.role === 'owner' && isWorkspacePremiumPlan;
   const hasPaidChannelAccess = user?.subscriptionStatus === 'basic' || user?.subscriptionStatus === 'premium';
+  const ledgerAccountTypeLabels: Record<LedgerAccount['accountType'], string> = {
+    asset: 'Assets',
+    liability: 'Liabilities',
+    equity: 'Equity',
+    income: 'Income',
+    expense: 'Expenses'
+  };
+  const groupedLedgerAccounts = (['asset', 'liability', 'equity', 'income', 'expense'] as const)
+    .map((accountType) => ({
+      accountType,
+      label: ledgerAccountTypeLabels[accountType],
+      accounts: settingsLedgerAccounts.filter((entry) => entry.accountType === accountType)
+    }))
+    .filter((group) => group.accounts.length > 0);
+  const customLedgerParentCandidates = settingsLedgerAccounts.filter(
+    (entry) => entry.isActive && entry.accountType === customLedgerAccountType
+  );
+  const editingLedger = settingsLedgerAccounts.find((entry) => entry.id === editingLedgerId) ?? null;
+  const editingLedgerParentCandidates = editingLedger
+    ? settingsLedgerAccounts.filter(
+      (entry) => entry.isActive && entry.accountType === editingLedger.accountType && entry.id !== editingLedger.id
+    )
+    : [];
+  const manualJournalDebitTotal = manualJournalLines.reduce(
+    (total, line) => total + Number(line.debitAmount || 0),
+    0
+  );
+  const manualJournalCreditTotal = manualJournalLines.reduce(
+    (total, line) => total + Number(line.creditAmount || 0),
+    0
+  );
+  const ledgerDiagnosticTransactions = transactions
+    .filter((tx) => tx.ledgerPostingStatus && tx.ledgerPostingStatus !== 'posted')
+    .slice(0, 12);
+  const ledgerDiagnosticCounts = {
+    notConfigured: transactions.filter((tx) => tx.ledgerPostingStatus === 'not_configured').length,
+    failed: transactions.filter((tx) => tx.ledgerPostingStatus === 'failed').length,
+    skipped: transactions.filter((tx) => tx.ledgerPostingStatus === 'skipped').length,
+    pending: transactions.filter((tx) => tx.ledgerPostingStatus === 'pending').length,
+    needsReview: settingsJournalEntries.filter((entry) => entry.status === 'needs_review').length
+  };
+  const formatJournalLine = (line: LedgerJournalEntry['lines'][number]) => (
+    `${line.account.code} ${line.account.name}: Dr ${formatCurrency(line.debitAmount)} / Cr ${formatCurrency(line.creditAmount)}`
+  );
+  const describeLedgerDiagnostic = (transaction: Transaction): string => {
+    switch (transaction.ledgerPostingStatus) {
+      case 'not_configured':
+        return 'Posting could not run because required ledger accounts are missing for this workspace.';
+      case 'failed':
+        return 'Posting failed and should be reviewed by an owner or bookkeeper.';
+      case 'skipped':
+        return transaction.status === 'draft'
+          ? 'Draft transactions are intentionally not posted until they are confirmed.'
+          : 'This transaction is currently excluded from ledger posting.';
+      case 'pending':
+        return 'Posting is still pending and should complete after the transaction update finishes.';
+      default:
+        return 'This transaction needs accounting attention.';
+    }
+  };
+  const ledgerDiagnosticTone = (status?: Transaction['ledgerPostingStatus']) => {
+    if (status === 'failed') return 'bg-rose-100 text-rose-700';
+    if (status === 'not_configured') return 'bg-amber-100 text-amber-700';
+    if (status === 'pending') return 'bg-blue-100 text-blue-700';
+    return 'bg-gray-200 text-gray-700';
+  };
+  const cashBookBalance = settingsBalanceSheet?.assets.lines.find((line) => line.code === '1000')?.balance ?? 0;
+  const momoBookBalance = settingsBalanceSheet?.assets.lines.find((line) => line.code === '1010')?.balance ?? 0;
+  const parsedCashActualBalance = cashActualBalanceInput.trim() === '' ? null : Number(cashActualBalanceInput);
+  const parsedMomoActualBalance = momoActualBalanceInput.trim() === '' ? null : Number(momoActualBalanceInput);
+  const cashVariance = parsedCashActualBalance === null || Number.isNaN(parsedCashActualBalance)
+    ? null
+    : Math.round((parsedCashActualBalance - cashBookBalance) * 100) / 100;
+  const momoVariance = parsedMomoActualBalance === null || Number.isNaN(parsedMomoActualBalance)
+    ? null
+    : Math.round((parsedMomoActualBalance - momoBookBalance) * 100) / 100;
+  const recentCashTransactions = transactions
+    .filter((tx) => ['cash_sale', 'debtor_recovery', 'operating_expense', 'owner_withdrawal', 'loan_received', 'loan_repayment', 'stock_purchase', 'capital_introduced'].includes(tx.eventType ?? 'other'))
+    .slice(0, 5);
+  const recentMomoTransactions = transactions
+    .filter((tx) => tx.eventType === 'momo_sale')
+    .slice(0, 5);
+  const recentCashReconciliationSessions = reconciliationSessions.filter((entry) => entry.channel === 'cash').slice(0, 4);
+  const recentMomoReconciliationSessions = reconciliationSessions.filter((entry) => entry.channel === 'momo').slice(0, 4);
+  const varianceTone = (variance: number | null) => {
+    if (variance === null) return 'bg-gray-100 text-gray-700';
+    if (variance === 0) return 'bg-emerald-100 text-emerald-700';
+    if (variance > 0) return 'bg-blue-100 text-blue-700';
+    return 'bg-rose-100 text-rose-700';
+  };
+  const varianceLabel = (variance: number | null) => {
+    if (variance === null) return 'Awaiting actual balance';
+    if (variance === 0) return 'Balanced';
+    if (variance > 0) return `Over by ${formatCurrency(Math.abs(variance))}`;
+    return `Short by ${formatCurrency(Math.abs(variance))}`;
+  };
+  const saveReconciliationSession = useCallback(async (channel: 'cash' | 'momo') => {
+    const countedValue = channel === 'cash' ? parsedCashActualBalance : parsedMomoActualBalance;
+    const bookValue = channel === 'cash' ? cashBookBalance : momoBookBalance;
+    const notesValue = channel === 'cash' ? cashReconciliationNotes : momoReconciliationNotes;
 
-  const activeWeeklySummary = weeklySummary ?? defaultWeeklySummary;
-  const activeMonthlySummary = monthlySummary ?? {
+    if (countedValue === null || Number.isNaN(countedValue)) {
+      setError(`Enter the actual ${channel === 'cash' ? 'cash counted' : 'wallet balance'} before saving.`);
+      return;
+    }
+
+    setError(null);
+    setSettingsNotice(null);
+
+    try {
+      await createReconciliationSessionMutation.mutateAsync({
+        channel,
+        asOf: `${reconciliationAsOfDate}T23:59:59.999Z`,
+        bookBalance: bookValue,
+        countedBalance: countedValue,
+        notes: notesValue.trim() || null
+      });
+      setSettingsNotice(`${channel === 'cash' ? 'Cash' : 'MoMo'} reconciliation saved.`);
+    } catch (saveError) {
+      console.error('Unable to save reconciliation session', saveError);
+      setError(saveError instanceof Error ? saveError.message : 'Unable to save reconciliation session right now.');
+    }
+  }, [
+    cashBookBalance,
+    cashReconciliationNotes,
+    createReconciliationSessionMutation,
+    momoBookBalance,
+    momoReconciliationNotes,
+    parsedCashActualBalance,
+    parsedMomoActualBalance,
+    reconciliationAsOfDate
+  ]);
+  const renderBalanceSheetSection = (label: string, section: BalanceSheetSnapshot['assets']) => (
+    <div className="rounded-2xl border border-gray-200">
+      <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
+        <h4 className="text-sm font-semibold uppercase tracking-wide text-gray-700">{label}</h4>
+        <span className="text-sm font-bold text-gray-900">{formatCurrency(section.total)}</span>
+      </div>
+      <div className="divide-y divide-gray-100">
+        {section.lines.length === 0 ? (
+          <div className="px-4 py-3 text-sm text-gray-500">No balances yet.</div>
+        ) : (
+          section.lines.map((line) => (
+            <div key={line.accountId} className="grid gap-2 px-4 py-3 sm:grid-cols-[100px_1fr_auto] sm:items-center">
+              <p className="text-sm font-semibold text-gray-900">{line.code}</p>
+              <p className="text-sm text-gray-700">{line.name}</p>
+              <p className="text-sm font-semibold text-gray-900">{formatCurrency(line.balance)}</p>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+
+  const renderBalanceSheetSnapshotCard = () => (
+    <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
+      <div className="mb-4 flex items-center justify-between">
+        <div>
+          <h3 className="text-lg font-semibold text-gray-900">Balance Sheet Snapshot</h3>
+          <p className="text-sm text-gray-500">Ledger-based position as of {settingsBalanceSheet ? formatDate(new Date(settingsBalanceSheet.asOf)) : 'today'}.</p>
+        </div>
+        <button
+          onClick={() => void settingsBalanceSheetQuery.refetch()}
+          disabled={settingsBalanceSheetQuery.isFetching}
+          className="rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+        >
+          {settingsBalanceSheetQuery.isFetching ? 'Refreshing...' : 'Refresh'}
+        </button>
+      </div>
+
+      {settingsBalanceSheetQuery.isLoading ? (
+        <p className="text-sm text-gray-500">Loading balance sheet...</p>
+      ) : settingsBalanceSheetQuery.isError || !settingsBalanceSheet ? (
+        <p className="text-sm text-red-600">Unable to load balance sheet right now.</p>
+      ) : (
+        <div className="space-y-4">
+          {renderBalanceSheetSection('Assets', settingsBalanceSheet.assets)}
+          {renderBalanceSheetSection('Liabilities', settingsBalanceSheet.liabilities)}
+          {renderBalanceSheetSection('Equity', settingsBalanceSheet.equity)}
+
+          <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-4">
+            <div className="flex items-center justify-between text-sm font-semibold text-gray-900">
+              <span>Current earnings</span>
+              <span>{formatCurrency(settingsBalanceSheet.currentEarnings.balance)}</span>
+            </div>
+            <p className="mt-1 text-xs text-gray-500">
+              Current period earnings remain separate until formal closing/retained earnings is introduced.
+            </p>
+          </div>
+
+          <div className="rounded-2xl border border-gray-900 bg-gray-50 px-4 py-4">
+            <div className="flex items-center justify-between text-sm font-semibold text-gray-900">
+              <span>Total Assets</span>
+              <span>{formatCurrency(settingsBalanceSheet.totals.assets)}</span>
+            </div>
+            <div className="mt-1 flex items-center justify-between text-sm font-semibold text-gray-900">
+              <span>Total Liabilities + Equity</span>
+              <span>{formatCurrency(settingsBalanceSheet.totals.liabilitiesAndEquity)}</span>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  const ApprovalBellButton = ({ solid = false }: { solid?: boolean }) => (
+    <button
+      onClick={() => setView('approvals')}
+      className={`relative ${solid ? 'w-10 h-10 bg-white/20 rounded-full flex items-center justify-center' : 'p-2'}`}
+      aria-label="Approval notifications"
+    >
+      <BellIcon className="text-white" size={20} />
+      {canReviewApprovals && pendingApprovalCount > 0 && (
+        <span className="absolute -right-1 -top-1 inline-flex min-w-5 items-center justify-center rounded-full bg-amber-400 px-1.5 py-0.5 text-[10px] font-bold text-green-950">
+          {pendingApprovalCount > 9 ? '9+' : pendingApprovalCount}
+        </span>
+      )}
+    </button>
+  );
+
+  const activeWeeklySummary = weeklySummary ?? (user ? emptySummaryPayload : defaultWeeklySummary);
+  const activeMonthlySummary = monthlySummary ?? (user ? emptySummaryPayload : {
     totalRevenue: currentMonthSummary.totalRevenue,
     totalExpenses: currentMonthSummary.totalExpenses,
     directExpenses: currentMonthSummary.totalExpenses,
@@ -644,8 +1235,28 @@ export default function App() {
       totalCashInflow: currentMonthSummary.totalRevenue,
       totalCashOutflow: currentMonthSummary.totalExpenses,
       netCashFlow: currentMonthSummary.profit
+    },
+    completeness: {
+      totalRecords: currentMonthSummary.transactionCount,
+      assignedSalesCount: 0,
+      unassignedSalesCount: 0,
+      assignedSalesAmount: 0,
+      unassignedSalesAmount: 0,
+      productAssignmentRatio: 1,
+      lowConfidenceCount: 0,
+      mediumConfidenceCount: 0,
+      reviewFlaggedCount: 0,
+      completenessScore: 1
     }
-  };
+  });
+  const isOverviewLoading = Boolean(user) && (
+    transactionsQuery.isLoading
+    || weeklySummaryQuery.isLoading
+    || monthlySummaryQuery.isLoading
+    || currentInsightsQuery.isLoading
+  );
+  const overviewLoadError = [transactionsQuery.error, weeklySummaryQuery.error, monthlySummaryQuery.error, currentInsightsQuery.error]
+    .find(Boolean);
 
   const canShowInstallPromptByCooldown = () => {
     const lastDismissedRaw = window.localStorage.getItem(INSTALL_PROMPT_DISMISS_KEY);
@@ -933,6 +1544,19 @@ export default function App() {
     setView('attach');
   };
 
+  const handleApprovalReview = useCallback(async (
+    approval: PendingTransactionApproval,
+    action: 'approve' | 'reject'
+  ) => {
+    setError(null);
+    try {
+      await reviewPendingApprovalMutation.mutateAsync({ approvalId: approval.id, action });
+    } catch (reviewError) {
+      console.error('Unable to review approval request', reviewError);
+      setError(reviewError instanceof Error ? reviewError.message : 'Unable to review approval right now.');
+    }
+  }, [reviewPendingApprovalMutation]);
+
   const refreshReferralData = async () => {
     if (!user) return;
     setIsReferralLoading(true);
@@ -1094,6 +1718,55 @@ export default function App() {
     }
   }, [applyChatEntryResult, isOutboxSyncing, postChatEntryMutation, refreshPendingSyncCount, user]);
 
+  const appendBotMessage = useCallback((content: string) => {
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        type: 'bot',
+        content,
+        timestamp: new Date()
+      }
+    ]);
+  }, []);
+
+  const markWalkthroughSeen = useCallback((userId: string) => {
+    try {
+      window.localStorage.setItem(walkthroughSeenStorageKey(userId), '1');
+    } catch {
+      // best-effort only
+    }
+  }, []);
+
+  const isProfitIntent = (message: string): { period: 'last_week' | 'last_month' } | null => {
+    const normalized = message.toLowerCase();
+    if (!normalized.includes('profit')) return null;
+    if (normalized.includes('last week') || normalized.includes('week')) {
+      return { period: 'last_week' };
+    }
+    if (normalized.includes('last month') || normalized.includes('month')) {
+      return { period: 'last_month' };
+    }
+    return null;
+  };
+
+  const buildProfitSummaryReply = (period: 'last_week' | 'last_month'): string => {
+    const summary = period === 'last_week' ? activeWeeklySummary : activeMonthlySummary;
+    const label = period === 'last_week' ? 'last week' : 'last month';
+    const inflow = summary.totalRevenue ?? 0;
+    const outflow = summary.totalExpenses ?? 0;
+    const profit = inflow - outflow;
+    const trend = profit >= 0 ? 'profit' : 'loss';
+    return [
+      `Here is your ${label} summary:`,
+      `Inflow: ${formatCurrency(inflow)}`,
+      `Outflow: ${formatCurrency(outflow)}`,
+      `Profit: ${formatCurrency(profit)} (${trend})`,
+      '',
+      'Formula: Inflow - Outflow = Profit'
+    ].join('\n');
+  };
+
   const submitChatMessage = useCallback(async (message: string) => {
     if (!user) {
       setError('Please complete onboarding before sending messages.');
@@ -1110,6 +1783,71 @@ export default function App() {
     };
     setMessages((prev) => [...prev, userMessage]);
     setError(null);
+
+    const normalizedMessage = message.trim().toLowerCase();
+    const yesIntent = ['yes', 'y', 'okay', 'ok', 'sure'].includes(normalizedMessage);
+    const noIntent = ['no', 'n', 'later', 'not now'].includes(normalizedMessage);
+    const walkthroughIntent = normalizedMessage === 'walkthrough' || normalizedMessage === 'help me start';
+
+    if (walkthroughStage === 'awaiting_opt_in') {
+      if (yesIntent) {
+        appendBotMessage([
+          'Great. Quick tips to use Akonta smoothly:',
+          '1. To record money in: start with "Inflow ..." (example: Inflow 1200 cash sale).',
+          '2. To record money out: start with "Outflow ..." (example: Outflow 300 transport).',
+          '3. To get performance quickly: ask "how much profit did we make last week" or "last month".',
+          '',
+          'Do you need help setting up Telegram or WhatsApp now? Reply YES or NO.'
+        ].join('\n'));
+        setWalkthroughStage('awaiting_channel_help');
+      } else if (noIntent) {
+        appendBotMessage('No problem. You can type "walkthrough" anytime and I will guide you step by step.');
+        setWalkthroughStage('done');
+        markWalkthroughSeen(user.id);
+      } else {
+        appendBotMessage('Reply YES to start the quick walkthrough, or NO to skip for now.');
+      }
+      return;
+    }
+
+    if (walkthroughStage === 'awaiting_channel_help') {
+      if (yesIntent || normalizedMessage.includes('telegram') || normalizedMessage.includes('whatsapp')) {
+        const telegramCommand = user.phoneNumber ? `/link ${user.phoneNumber}` : '/link +233XXXXXXXXX';
+        appendBotMessage([
+          'Setup directions:',
+          `1. Telegram: open Settings > Advanced > copy this command and send it to Akonta bot: ${telegramCommand}`,
+          '2. WhatsApp: available on paid plans (Basic/Premium). Go to Settings > Referral rewards and choose your upgrade.',
+          '',
+          'After setup, send a test message: "Inflow 100 cash sale".'
+        ].join('\n'));
+        setWalkthroughStage('done');
+        markWalkthroughSeen(user.id);
+      } else if (noIntent) {
+        appendBotMessage('Alright. You can open Settings > Advanced any time for Telegram/WhatsApp setup guidance.');
+        setWalkthroughStage('done');
+        markWalkthroughSeen(user.id);
+      } else {
+        appendBotMessage('Reply YES if you want channel setup help now, or NO to continue without it.');
+      }
+      return;
+    }
+
+    if (walkthroughIntent) {
+      appendBotMessage([
+        'Quick walkthrough:',
+        'Use keyword "Inflow" for money coming in and "Outflow" for payments you make.',
+        'Example: "Inflow 490 cash sale" or "Outflow 200 water".',
+        'For reports, ask: "how much profit did we make last week/month".'
+      ].join('\n'));
+      setWalkthroughStage('awaiting_channel_help');
+      return;
+    }
+
+    const profitIntent = isProfitIntent(message);
+    if (profitIntent) {
+      appendBotMessage(buildProfitSummaryReply(profitIntent.period));
+      return;
+    }
 
     try {
       const result = await postChatEntryMutation.mutateAsync({
@@ -1162,7 +1900,18 @@ export default function App() {
       };
       setMessages((prev) => [...prev, errorResponse]);
     }
-  }, [applyChatEntryResult, postChatEntryMutation, refreshPendingSyncCount, user]);
+  }, [
+    activeMonthlySummary,
+    activeWeeklySummary,
+    appendBotMessage,
+    applyChatEntryResult,
+    formatCurrency,
+    markWalkthroughSeen,
+    postChatEntryMutation,
+    refreshPendingSyncCount,
+    user,
+    walkthroughStage
+  ]);
 
   const heroSlides = [
     {
@@ -1292,6 +2041,14 @@ export default function App() {
   }, [user]);
 
   useEffect(() => {
+    if (!user) {
+      setWalkthroughStage('idle');
+      return;
+    }
+    setWalkthroughStage('idle');
+  }, [user?.id]);
+
+  useEffect(() => {
     if (!authSession) {
       setLegacyUserContext(user?.id ?? null);
     }
@@ -1353,13 +2110,16 @@ export default function App() {
   }, [flushPendingChatOutbox, user]);
 
   useEffect(() => {
-    const current = (user?.currencyCode ?? 'GHS').toUpperCase();
-    if (supportedCurrencies.includes(current as typeof supportedCurrencies[number])) {
-      setSettingsCurrencyCode(current as typeof supportedCurrencies[number]);
-    } else {
-      setSettingsCurrencyCode('GHS');
+    if (!settingsProfile) return;
+    setSettingsBusinessName(settingsProfile.businessName ?? '');
+    setSettingsBusinessType(settingsProfile.businessType ?? '');
+    setSettingsCurrencyCode((settingsProfile.currencyCode as 'GHS' | 'USD' | 'NGN' | 'KES' | 'EUR' | 'GBP') ?? 'GHS');
+    setSettingsTimezone(settingsProfile.timezone ?? 'Africa/Accra');
+    setSettingsPreferredTime(user?.preferredTime ?? 'evening');
+    if (Array.isArray(settingsProfile.enabledPaymentMethods) && settingsProfile.enabledPaymentMethods.length > 0) {
+      setSettingsPaymentMethods(settingsProfile.enabledPaymentMethods);
     }
-  }, [user?.currencyCode]);
+  }, [settingsProfile, user?.preferredTime]);
 
   useEffect(() => {
     const standalone = window.matchMedia('(display-mode: standalone)').matches
@@ -1426,6 +2186,24 @@ export default function App() {
       }
     }
   }, [user]);
+
+  useEffect(() => {
+    if (!user || view !== 'chat' || walkthroughStage !== 'idle') return;
+    let seen = false;
+    try {
+      seen = window.localStorage.getItem(walkthroughSeenStorageKey(user.id)) === '1';
+    } catch {
+      seen = false;
+    }
+    if (seen) {
+      setWalkthroughStage('done');
+      return;
+    }
+    appendBotMessage(
+      'Welcome. Would you like a quick walkthrough to get started smoothly? Reply YES or NO.'
+    );
+    setWalkthroughStage('awaiting_opt_in');
+  }, [appendBotMessage, user, view, walkthroughStage]);
 
   useEffect(() => {
     if (monthlySummaryQuery.data?.summary) {
@@ -1615,6 +2393,104 @@ export default function App() {
       setReportLockNotice(null);
     }
   }, [hasReportAccess]);
+
+  const openHistoryReview = useCallback((transaction: Transaction) => {
+    setHistoryReviewTarget(transaction);
+    setHistoryReviewAmount(String(transaction.amount));
+    setHistoryReviewDate(new Date(transaction.date).toISOString().slice(0, 10));
+    setHistoryReviewCategory(transaction.category ?? '');
+    setHistoryReviewNotes(transaction.notes ?? '');
+    setHistoryReviewEventType(transaction.eventType ?? 'other');
+    setError(null);
+  }, []);
+
+  const closeHistoryReview = useCallback(() => {
+    setHistoryReviewTarget(null);
+    setHistoryReviewAmount('');
+    setHistoryReviewDate('');
+    setHistoryReviewCategory('');
+    setHistoryReviewNotes('');
+    setHistoryReviewEventType('other');
+  }, []);
+
+  const openTransactionDrilldown = useCallback((transactionId: string) => {
+    const transaction = transactions.find((entry) => entry.id === transactionId);
+    if (!transaction) {
+      setError('We could not find that source transaction in this workspace.');
+      return;
+    }
+
+    applyHistoryDatePreset('all_time');
+    setHistoryTransactionTypeFilter('all');
+    setHistoryAttachmentFilter('all');
+    setHistoryQualityFilter('all');
+    openHistoryReview(transaction);
+    setView('history');
+  }, [applyHistoryDatePreset, openHistoryReview, transactions]);
+
+  const openJournalEntryDrilldown = useCallback((transactionId: string) => {
+    const journalEntry = settingsJournalEntries.find((entry) => entry.transaction?.id === transactionId);
+    if (!journalEntry) {
+      setError('No linked journal entry was found for that transaction yet.');
+      return;
+    }
+
+    setFocusedJournalEntryId(journalEntry.id);
+    setSettingsSection('ledger');
+    setView('settings');
+  }, [settingsJournalEntries]);
+
+  const handleHistoryReviewSave = useCallback(async () => {
+    if (!user || !historyReviewTarget) return;
+
+    const amount = Number(historyReviewAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setError('Enter a valid amount before saving this review.');
+      return;
+    }
+
+    setError(null);
+    setSettingsNotice(null);
+    setTeamNotice(null);
+
+    try {
+      const result = await reviewTransactionMutation.mutateAsync({
+        id: historyReviewTarget.id,
+        updates: {
+          type: historyReviewTarget.type,
+          eventType: historyReviewEventType ?? 'other',
+          amount,
+          date: historyReviewDate,
+          category: historyReviewCategory.trim() || null,
+          notes: historyReviewNotes.trim() || null,
+          requiresReview: false,
+          correctionReason: 'Reviewed and updated from history'
+        }
+      });
+
+      invalidateUserDataQueries(user.id, { includeBudgets: true });
+      setSettingsNotice(
+        'id' in result
+          ? 'Record updated and removed from needs-review.'
+          : 'Historical record submitted for approval. It will update once approved.'
+      );
+      closeHistoryReview();
+    } catch (reviewError) {
+      console.error('Unable to review transaction', reviewError);
+      setError(reviewError instanceof Error ? reviewError.message : 'Unable to save this review right now.');
+    }
+  }, [
+    closeHistoryReview,
+    historyReviewAmount,
+    historyReviewCategory,
+    historyReviewDate,
+    historyReviewEventType,
+    historyReviewNotes,
+    historyReviewTarget,
+    invalidateUserDataQueries,
+    reviewTransactionMutation,
+    user
+  ]);
 
   const handleRequestOtp = async () => {
     const normalizedPhone = authPhoneNumber.trim();
@@ -1855,6 +2731,14 @@ export default function App() {
 
   // Onboarding Flow
   if (view === 'onboarding') {
+    const paymentMethodOptions: Array<{ value: BusinessPaymentMethod; label: string }> = [
+      { value: 'cash', label: 'Cash' },
+      { value: 'momo', label: 'MoMo' },
+      { value: 'bank', label: 'Bank transfer' },
+      { value: 'card', label: 'Card / POS' },
+      { value: 'credit', label: 'Credit sales' }
+    ];
+
     const steps = [
       {
         title: "What's your name?",
@@ -1881,14 +2765,25 @@ export default function App() {
         options: ['Trading / Retail', 'Food & Beverages', 'Services', 'Fashion & Beauty', 'Tech & Digital', 'Other']
       },
       {
-        title: "When should we check in?",
-        subtitle: "Pick your preferred daily reminder time",
-        field: 'preferredTime',
-        options: ['morning', 'afternoon', 'evening']
+        title: 'What currency should we use?',
+        subtitle: 'You can change this later in settings',
+        field: 'currencyCode',
+        options: ['GHS', 'NGN', 'USD', 'KES', 'EUR', 'GBP']
+      },
+      {
+        title: 'Which payment methods do you use?',
+        subtitle: 'Select at least one. This helps Akonta classify entries better.',
+        field: 'paymentMethods'
       }
     ];
 
-    const currentStep = steps[onboardingStep];
+    const currentStep = steps[onboardingStep] as {
+      title: string;
+      subtitle: string;
+      field: keyof typeof formData;
+      placeholder?: string;
+      options?: string[];
+    };
 
     const finishOnboarding = async () => {
       if (onboardingStep < steps.length - 1) {
@@ -1906,7 +2801,8 @@ export default function App() {
           businessType: formData.businessType,
           preferredTime: formData.preferredTime,
           timezone: 'Africa/Accra',
-          currencyCode: 'GHS',
+          currencyCode: formData.currencyCode,
+          paymentMethods: formData.paymentMethods,
           referralCode: onboardingReferralCode ?? undefined,
           subscriptionStatus: 'trial'
         });
@@ -1966,61 +2862,51 @@ export default function App() {
               </p>
             )}
 
-            {currentStep.options ? (
+            {currentStep.field === 'paymentMethods' ? (
               <div className="space-y-3">
-                {currentStep.field === 'preferredTime' ? (
-                  <>
-                    {['morning', 'afternoon', 'evening'].map((time) => (
-                      <button
-                        key={time}
-                        onClick={() => setFormData({ ...formData, preferredTime: time as 'morning' | 'afternoon' | 'evening' })}
-                        className={`w-full p-4 rounded-2xl border-2 transition-all ${
-                          formData.preferredTime === time
-                            ? 'border-green-500 bg-green-50'
-                            : 'border-gray-200 bg-white hover:border-gray-300'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-3">
-                            <span className="text-2xl">
-                              {time === 'morning' ? '🌅' : time === 'afternoon' ? '☀️' : '🌙'}
-                            </span>
-                            <div className="text-left">
-                              <p className="font-semibold text-gray-900 capitalize">{time}</p>
-                              <p className="text-sm text-gray-500">
-                                {time === 'morning' ? '8:00 AM' : time === 'afternoon' ? '2:00 PM' : '7:00 PM'}
-                              </p>
-                            </div>
-                          </div>
-                          {formData.preferredTime === time && (
-                            <CheckIcon className="text-green-500" size={20} />
-                          )}
-                        </div>
-                      </button>
-                    ))}
-                  </>
-                ) : (
-                  <>
-                    {currentStep.options.map((option) => (
-                      <button
-                        key={option}
-                        onClick={() => setFormData({ ...formData, [currentStep.field]: option as any })}
-                        className={`w-full p-4 rounded-2xl border-2 transition-all text-left ${
-                          formData[currentStep.field as keyof typeof formData] === option
-                            ? 'border-green-500 bg-green-50'
-                            : 'border-gray-200 bg-white hover:border-gray-300'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <span className="font-medium text-gray-900">{option}</span>
-                          {formData[currentStep.field as keyof typeof formData] === option && (
-                            <CheckIcon className="text-green-500" size={20} />
-                          )}
-                        </div>
-                      </button>
-                    ))}
-                  </>
-                )}
+                {paymentMethodOptions.map((option) => {
+                  const selected = formData.paymentMethods.includes(option.value);
+                  return (
+                    <button
+                      key={option.value}
+                      onClick={() => {
+                        const next = selected
+                          ? formData.paymentMethods.filter((entry) => entry !== option.value)
+                          : [...formData.paymentMethods, option.value];
+                        setFormData({ ...formData, paymentMethods: next });
+                      }}
+                      className={`w-full p-4 rounded-2xl border-2 transition-all text-left ${
+                        selected ? 'border-green-500 bg-green-50' : 'border-gray-200 bg-white hover:border-gray-300'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium text-gray-900">{option.label}</span>
+                        {selected && <CheckIcon className="text-green-500" size={20} />}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : currentStep.options ? (
+              <div className="space-y-3">
+                {currentStep.options.map((option) => (
+                  <button
+                    key={option}
+                    onClick={() => setFormData({ ...formData, [currentStep.field]: option as never })}
+                    className={`w-full p-4 rounded-2xl border-2 transition-all text-left ${
+                      formData[currentStep.field as keyof typeof formData] === option
+                        ? 'border-green-500 bg-green-50'
+                        : 'border-gray-200 bg-white hover:border-gray-300'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium text-gray-900">{option}</span>
+                      {formData[currentStep.field as keyof typeof formData] === option && (
+                        <CheckIcon className="text-green-500" size={20} />
+                      )}
+                    </div>
+                  </button>
+                ))}
               </div>
             ) : (
               <input
@@ -2042,7 +2928,12 @@ export default function App() {
             )}
             <button
               onClick={finishOnboarding}
-              disabled={!formData[currentStep.field as keyof typeof formData] || isOnboardingSubmitting}
+              disabled={
+                (currentStep.field === 'paymentMethods'
+                  ? formData.paymentMethods.length === 0
+                  : !formData[currentStep.field as keyof typeof formData])
+                || isOnboardingSubmitting
+              }
               className="w-full py-4 bg-green-500 text-white rounded-2xl font-semibold text-lg hover:bg-green-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isOnboardingSubmitting ? 'Saving...' : onboardingStep === steps.length - 1 ? 'Start 1-Month Free Trial' : 'Continue'}
@@ -2467,6 +3358,8 @@ export default function App() {
           <p className="text-sm text-gray-500">No expense categories available for this period.</p>
         )}
       </div>
+
+      {renderBalanceSheetSnapshotCard()}
     </div>
   );
 
@@ -2588,9 +3481,7 @@ export default function App() {
                     : 'Web + Telegram active • Upgrade to Basic or Premium for WhatsApp channel.'}
               </p>
             </div>
-            <button className="p-2">
-              <BellIcon className="text-white" size={20} />
-            </button>
+            <ApprovalBellButton />
           </div>
 
           {/* Messages */}
@@ -2667,9 +3558,7 @@ export default function App() {
               <p className="text-green-100 text-sm">Good {dashboardDayPart},</p>
               <h1 className="text-white text-xl font-bold">{user?.name || 'Kofi'}</h1>
             </div>
-            <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center">
-              <BellIcon className="text-white" size={20} />
-            </div>
+            <ApprovalBellButton solid />
           </div>
         </div>
 
@@ -2711,6 +3600,16 @@ export default function App() {
           {reportLockNotice && (
             <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
               {reportLockNotice}
+            </div>
+          )}
+          {dashboardTab === 'overview' && isOverviewLoading && (
+            <div className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+              Refreshing overview for the current workspace...
+            </div>
+          )}
+          {dashboardTab === 'overview' && overviewLoadError && (
+            <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+              Overview could not load live workspace data. Refresh the page or switch workspace again if this persists.
             </div>
           )}
 
@@ -2790,6 +3689,40 @@ export default function App() {
                 <p className="mt-2 text-2xl font-bold text-red-600">{formatCurrency(activeMonthlySummary.totalExpenses)}</p>
               </div>
             </div>
+          </div>
+
+          <div className="bg-white rounded-3xl shadow-lg shadow-gray-200 p-6">
+            <div className="mb-4 flex items-center justify-between">
+              <h3 className="font-semibold text-gray-900">Report quality</h3>
+              <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-semibold text-gray-700">
+                {Math.round((activeMonthlySummary.completeness?.completenessScore ?? 1) * 100)}%
+              </span>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="rounded-2xl border border-gray-200 p-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Product assignment</p>
+                <p className="mt-2 text-sm font-semibold text-gray-900">
+                  {Math.round((activeMonthlySummary.completeness?.productAssignmentRatio ?? 1) * 100)}% of sales assigned
+                </p>
+                <p className="mt-1 text-xs text-gray-600">
+                  Unassigned sales: {formatCurrency(activeMonthlySummary.completeness?.unassignedSalesAmount ?? 0)}
+                </p>
+              </div>
+              <div className="rounded-2xl border border-gray-200 p-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Interpretation confidence</p>
+                <p className="mt-2 text-sm font-semibold text-gray-900">
+                  Low confidence: {activeMonthlySummary.completeness?.lowConfidenceCount ?? 0}
+                </p>
+                <p className="mt-1 text-xs text-gray-600">
+                  Needs review: {activeMonthlySummary.completeness?.reviewFlaggedCount ?? 0}
+                </p>
+              </div>
+            </div>
+            {(activeMonthlySummary.completeness?.unassignedSalesAmount ?? 0) > 0 && (
+              <p className="mt-4 rounded-2xl bg-amber-50 px-4 py-3 text-xs text-amber-800">
+                Product-level insights are partial because some sales are still unassigned.
+              </p>
+            )}
           </div>
 
           <div className="bg-white rounded-3xl shadow-lg shadow-gray-200 p-6">
@@ -2935,6 +3868,13 @@ export default function App() {
         return true;
       })
       .filter((tx) => {
+        if (historyQualityFilter === 'all') return true;
+        if (historyQualityFilter === 'flagged') return tx.parseConfidence === 'low' || Boolean(tx.requiresReview);
+        if (historyQualityFilter === 'low_confidence') return tx.parseConfidence === 'low';
+        if (historyQualityFilter === 'needs_review') return Boolean(tx.requiresReview);
+        return true;
+      })
+      .filter((tx) => {
         const txDate = new Date(tx.date);
         if (historyStart && txDate < historyStart) return false;
         if (historyEnd && txDate > historyEnd) return false;
@@ -2957,7 +3897,8 @@ export default function App() {
       historyStartDate ||
       historyEndDate ||
       historyTransactionTypeFilter !== 'all' ||
-      historyAttachmentFilter !== 'all'
+      historyAttachmentFilter !== 'all' ||
+      historyQualityFilter !== 'all'
     );
 
     return (
@@ -2977,6 +3918,7 @@ export default function App() {
                     applyHistoryDatePreset('all_time');
                     setHistoryTransactionTypeFilter('all');
                     setHistoryAttachmentFilter('all');
+                    setHistoryQualityFilter('all');
                   }}
                   className="text-xs font-semibold text-green-600 hover:text-green-700"
                 >
@@ -3041,7 +3983,7 @@ export default function App() {
               </label>
             </div>
 
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <label className="space-y-1">
                 <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Transaction Type</span>
                 <select
@@ -3066,10 +4008,30 @@ export default function App() {
                   <option value="without">Without attachment</option>
                 </select>
               </label>
+              <label className="space-y-1">
+                <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Quality</span>
+                <select
+                  value={historyQualityFilter}
+                  onChange={(event) =>
+                    setHistoryQualityFilter(
+                      event.target.value as 'all' | 'flagged' | 'low_confidence' | 'needs_review'
+                    )
+                  }
+                  className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 focus:border-green-500 focus:outline-none"
+                >
+                  <option value="all">All quality levels</option>
+                  <option value="flagged">Any flagged</option>
+                  <option value="low_confidence">Low confidence only</option>
+                  <option value="needs_review">Needs review only</option>
+                </select>
+              </label>
             </div>
 
             <p className="text-xs text-gray-500">
               Showing {filteredTransactions.length} transaction{filteredTransactions.length === 1 ? '' : 's'}.
+            </p>
+            <p className="text-xs text-gray-500">
+              Flagged records can be opened here, corrected, and marked as reviewed. Historical changes will route through approval automatically.
             </p>
           </div>
 
@@ -3101,6 +4063,25 @@ export default function App() {
                         <div>
                           <p className="font-medium text-gray-900 capitalize">{tx.category || tx.type}</p>
                           {tx.notes && <p className="text-sm text-gray-500">{tx.notes}</p>}
+                          {(tx.parseConfidence === 'low' || tx.parseConfidence === 'medium' || tx.requiresReview) && (
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                              {tx.parseConfidence === 'low' && (
+                                <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-700">
+                                  Low confidence
+                                </span>
+                              )}
+                              {tx.parseConfidence === 'medium' && (
+                                <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[11px] font-semibold text-blue-700">
+                                  Medium confidence
+                                </span>
+                              )}
+                              {tx.requiresReview && (
+                                <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-semibold text-rose-700">
+                                  Needs review
+                                </span>
+                              )}
+                            </div>
+                          )}
                         </div>
                       </div>
                       <div className="flex flex-col items-end gap-2">
@@ -3115,9 +4096,252 @@ export default function App() {
                         >
                           {tx.attachmentName ? 'View attachment' : 'Attach document'}
                         </button>
+                        <button
+                          onClick={() => openHistoryReview(tx)}
+                          className="text-xs font-semibold text-gray-700 hover:text-gray-900"
+                        >
+                          {tx.requiresReview || tx.parseConfidence === 'low' || tx.parseConfidence === 'medium'
+                            ? 'Review & update'
+                            : 'Edit record'}
+                        </button>
+                        {tx.ledgerPostingStatus === 'posted' && (
+                          <button
+                            onClick={() => openJournalEntryDrilldown(tx.id)}
+                            className="text-xs font-semibold text-green-700 hover:text-green-800"
+                          >
+                            View linked journal
+                          </button>
+                        )}
                       </div>
                     </div>
                   ))}
+                </div>
+              </div>
+            ))
+          )}
+
+          {historyReviewTarget && (
+            <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/40 px-4 pb-6 pt-16 sm:items-center">
+              <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <h3 className="text-lg font-semibold text-gray-900">Review record</h3>
+                    <p className="mt-1 text-sm text-gray-500">
+                      Update the classification, amount, or notes, then save to clear the review flag.
+                    </p>
+                  </div>
+                  <button
+                    onClick={closeHistoryReview}
+                    className="rounded-full border border-gray-200 px-3 py-1 text-xs font-semibold text-gray-600 hover:bg-gray-50"
+                  >
+                    Close
+                  </button>
+                </div>
+
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  <label className="space-y-1">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Amount</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={historyReviewAmount}
+                      onChange={(event) => setHistoryReviewAmount(event.target.value)}
+                      className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm"
+                    />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Date</span>
+                    <input
+                      type="date"
+                      value={historyReviewDate}
+                      onChange={(event) => setHistoryReviewDate(event.target.value)}
+                      className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm"
+                    />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Type</span>
+                    <input
+                      value={historyReviewTarget.type === 'revenue' ? 'Revenue' : 'Expense'}
+                      disabled
+                      className="w-full rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600"
+                    />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Event</span>
+                    <select
+                      value={historyReviewEventType ?? 'other'}
+                      onChange={(event) => setHistoryReviewEventType(event.target.value as Transaction['eventType'])}
+                      className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm"
+                    >
+                      {transactionEventOptions.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="space-y-1 sm:col-span-2">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Category</span>
+                    <select
+                      value={historyReviewCategory}
+                      onChange={(event) => setHistoryReviewCategory(event.target.value)}
+                      className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm"
+                    >
+                      <option value="">No category</option>
+                      {settingsCategories
+                        .filter((entry) => entry.isActive && entry.kind === (historyReviewTarget.type === 'revenue' ? 'sales' : 'expense'))
+                        .map((entry) => (
+                          <option key={entry.id} value={entry.name}>{entry.name}</option>
+                        ))}
+                    </select>
+                  </label>
+                  <label className="space-y-1 sm:col-span-2">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Notes</span>
+                    <textarea
+                      value={historyReviewNotes}
+                      onChange={(event) => setHistoryReviewNotes(event.target.value)}
+                      rows={4}
+                      className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm"
+                    />
+                  </label>
+                </div>
+
+                <div className="mt-4 rounded-2xl bg-gray-50 px-4 py-3 text-xs text-gray-600">
+                  Records from earlier dates will create an approval request instead of changing immediately.
+                </div>
+
+                <div className="mt-5 flex flex-wrap justify-end gap-2">
+                  {historyReviewTarget.ledgerPostingStatus === 'posted' && (
+                    <button
+                      onClick={() => openJournalEntryDrilldown(historyReviewTarget.id)}
+                      className="rounded-2xl border border-green-300 bg-white px-4 py-3 text-sm font-semibold text-green-700 hover:bg-green-50"
+                    >
+                      View linked journal
+                    </button>
+                  )}
+                  <button
+                    onClick={closeHistoryReview}
+                    className="rounded-2xl border border-gray-300 bg-white px-4 py-3 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => void handleHistoryReviewSave()}
+                    disabled={reviewTransactionMutation.isPending}
+                    className="rounded-2xl bg-green-600 px-4 py-3 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-50"
+                  >
+                    {reviewTransactionMutation.isPending ? 'Saving...' : 'Save review'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <BottomNav />
+      </div>
+    );
+  }
+
+  if (view === 'approvals') {
+    return (
+      <div className="min-h-screen bg-gray-50 pb-20">
+        <div className="bg-white px-4 py-6 border-b border-gray-100">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900">Approval Notifications</h1>
+              <p className="text-sm text-gray-500">Historical edits and deletes appear here for owner or accounting review.</p>
+            </div>
+            <button
+              onClick={() => setView('dashboard')}
+              className="rounded-full border border-gray-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+            >
+              Back
+            </button>
+          </div>
+        </div>
+
+        <div className="px-4 py-6 space-y-4">
+          {!canReviewApprovals ? (
+            <div className="rounded-3xl border border-amber-200 bg-amber-50 p-6 text-sm text-amber-800">
+              Your current role does not have approval review access for historical changes.
+            </div>
+          ) : pendingApprovalsQuery.isLoading ? (
+            <div className="rounded-3xl border border-gray-200 bg-white p-6 text-sm text-gray-500">
+              Loading approval notifications...
+            </div>
+          ) : pendingApprovalsQuery.isError ? (
+            <div className="rounded-3xl border border-red-200 bg-red-50 p-6 text-sm text-red-700">
+              Unable to load approval notifications right now.
+            </div>
+          ) : pendingApprovals.length === 0 ? (
+            <div className="rounded-3xl border border-emerald-200 bg-emerald-50 p-6 text-sm text-emerald-800">
+              No pending historical updates right now. You are all caught up.
+            </div>
+          ) : (
+            pendingApprovals.map((approval) => (
+              <div key={approval.id} className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-gray-900">
+                      {approval.transaction.category || approval.transaction.eventType?.replace(/_/g, ' ') || approval.transaction.type}
+                    </p>
+                    <p className="mt-1 text-xs text-gray-500">
+                      Requested by {approval.requestedByUser?.fullName || approval.requestedByUser?.name || 'Team member'} on {formatDate(new Date(approval.requestedAt))}
+                    </p>
+                  </div>
+                  <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-700">
+                    Pending approval
+                  </span>
+                </div>
+
+                <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-2xl bg-gray-50 px-4 py-3">
+                    <p className="text-xs uppercase tracking-wide text-gray-500">Amount</p>
+                    <p className="mt-2 text-sm font-semibold text-gray-900">{formatCurrency(approval.transaction.amount)}</p>
+                  </div>
+                  <div className="rounded-2xl bg-gray-50 px-4 py-3">
+                    <p className="text-xs uppercase tracking-wide text-gray-500">Original date</p>
+                    <p className="mt-2 text-sm font-semibold text-gray-900">{formatDate(new Date(approval.transaction.date))}</p>
+                  </div>
+                  <div className="rounded-2xl bg-gray-50 px-4 py-3">
+                    <p className="text-xs uppercase tracking-wide text-gray-500">Event</p>
+                    <p className="mt-2 text-sm font-semibold capitalize text-gray-900">
+                      {(approval.transaction.eventType ?? 'other').replace(/_/g, ' ')}
+                    </p>
+                  </div>
+                </div>
+
+                {approval.reason && (
+                  <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
+                    {approval.reason.startsWith('PATCH_JSON:')
+                      ? 'Historical record update requested. Open the source transaction to inspect the current record before approving.'
+                      : approval.reason.startsWith('DELETE_REQUEST:')
+                        ? 'Historical delete request is waiting for approval.'
+                        : approval.reason}
+                  </div>
+                )}
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    onClick={() => openTransactionDrilldown(approval.transaction.id)}
+                    className="rounded-full border border-gray-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                  >
+                    Open source transaction
+                  </button>
+                  <button
+                    onClick={() => void handleApprovalReview(approval, 'reject')}
+                    disabled={reviewPendingApprovalMutation.isPending}
+                    className="rounded-full border border-rose-300 bg-white px-4 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                  >
+                    Reject
+                  </button>
+                  <button
+                    onClick={() => void handleApprovalReview(approval, 'approve')}
+                    disabled={reviewPendingApprovalMutation.isPending}
+                    className="rounded-full bg-green-600 px-4 py-2 text-xs font-semibold text-white hover:bg-green-700 disabled:opacity-50"
+                  >
+                    {reviewPendingApprovalMutation.isPending ? 'Saving...' : 'Approve'}
+                  </button>
                 </div>
               </div>
             ))
@@ -3889,6 +5113,13 @@ export default function App() {
     const basicMonthlyPrice = adminPaymentSettings?.basicAmount ?? adminPaymentDraft?.basicAmount ?? 60;
     const premiumMonthlyPrice = adminPaymentSettings?.premiumAmount ?? adminPaymentDraft?.premiumAmount ?? 200;
     const billingCurrencyCode = adminPaymentSettings?.currencyCode ?? adminPaymentDraft?.currencyCode ?? 'GHS';
+    const setupPaymentOptions: Array<{ value: BusinessPaymentMethod; label: string }> = [
+      { value: 'cash', label: 'Cash' },
+      { value: 'momo', label: 'MoMo' },
+      { value: 'bank', label: 'Bank transfer' },
+      { value: 'card', label: 'Card / POS' },
+      { value: 'credit', label: 'Credit' }
+    ];
 
     const handleSaveBudget = async () => {
       if (!user || !budgetAmount) return;
@@ -3919,21 +5150,264 @@ export default function App() {
       }
     };
 
-    const handleSaveCurrency = async () => {
+    const handleSaveBusinessProfile = async () => {
       if (!user) return;
       setError(null);
       setSettingsNotice(null);
       setTeamNotice(null);
       try {
-        const updated = await updateUserMutation.mutateAsync({
-          id: user.id,
-          updates: { currencyCode: settingsCurrencyCode }
+        const normalizedCurrencyCode = settingsCurrencyCode.toUpperCase() as 'GHS' | 'USD' | 'NGN' | 'KES' | 'EUR' | 'GBP';
+        const [updatedProfile, updatedUser] = await Promise.all([
+          updateBusinessProfileMutation.mutateAsync({
+            businessName: settingsBusinessName.trim() || undefined,
+            businessType: settingsBusinessType.trim() || null,
+            currencyCode: normalizedCurrencyCode,
+            timezone: settingsTimezone.trim() || 'Africa/Accra',
+            enabledPaymentMethods: settingsPaymentMethods,
+            onboardingCompleted: true
+          }),
+          updateUserProfileMutation.mutateAsync({
+            userId: user.id,
+            updates: {
+              businessName: settingsBusinessName.trim() || user.businessName,
+              businessType: settingsBusinessType.trim() || user.businessType,
+              timezone: settingsTimezone.trim() || 'Africa/Accra',
+              currencyCode: normalizedCurrencyCode,
+              preferredTime: settingsPreferredTime
+            }
+          })
+        ]);
+        setSettingsNotice('Business profile saved.');
+        setUser({
+          ...updatedUser,
+          businessName: updatedProfile.businessName,
+          businessType: updatedProfile.businessType ?? updatedUser.businessType,
+          currencyCode: updatedProfile.currencyCode,
+          timezone: updatedProfile.timezone,
+          preferredTime: updatedUser.preferredTime ?? settingsPreferredTime
         });
-        setUser(updated);
-        setSettingsNotice('Currency preference saved.');
-      } catch (currencyError) {
-        console.error('Unable to update currency', currencyError);
-        setError('Unable to save currency preference right now.');
+      } catch (profileError) {
+        console.error('Unable to save business profile', profileError);
+        setError(profileError instanceof Error ? profileError.message : 'Unable to save business profile right now.');
+      }
+    };
+
+    const handleBootstrapDefaults = async () => {
+      setError(null);
+      setSettingsNotice(null);
+      try {
+        await bootstrapDefaultsMutation.mutateAsync();
+        setSettingsNotice('Default categories and ledgers are ready.');
+      } catch (bootstrapError) {
+        console.error('Unable to bootstrap defaults', bootstrapError);
+        setError(bootstrapError instanceof Error ? bootstrapError.message : 'Unable to load default setup.');
+      }
+    };
+
+    const handleCreateCategory = async () => {
+      if (!setupCategoryName.trim()) return;
+      setError(null);
+      try {
+        await createCategoryMutation.mutateAsync({
+          kind: setupCategoryKind,
+          name: setupCategoryName.trim()
+        });
+        setSetupCategoryName('');
+        setSettingsNotice('Category saved.');
+      } catch (categoryError) {
+        console.error('Unable to save category', categoryError);
+        setError(categoryError instanceof Error ? categoryError.message : 'Unable to save category.');
+      }
+    };
+
+    const handleCreateProduct = async () => {
+      if (!setupProductName.trim()) return;
+      setError(null);
+      try {
+        await createProductMutation.mutateAsync({
+          name: setupProductName.trim(),
+          type: setupProductType,
+          categoryId: setupProductCategoryId || null,
+          defaultPrice: setupProductDefaultPrice ? Number(setupProductDefaultPrice) : null,
+          estimatedCost: setupProductEstimatedCost ? Number(setupProductEstimatedCost) : null
+        });
+        setSetupProductName('');
+        setSetupProductDefaultPrice('');
+        setSetupProductEstimatedCost('');
+        setSetupProductCategoryId('');
+        setSettingsNotice('Product/service saved.');
+      } catch (productError) {
+        console.error('Unable to save product/service', productError);
+        setError(productError instanceof Error ? productError.message : 'Unable to save product/service.');
+      }
+    };
+
+    const handleCreateCustomer = async () => {
+      if (!setupCustomerName.trim()) return;
+      setError(null);
+      try {
+        await createCustomerMutation.mutateAsync({
+          name: setupCustomerName.trim(),
+          phoneNumber: setupCustomerPhone.trim() || null,
+          openingReceivable: setupCustomerOpening ? Number(setupCustomerOpening) : 0
+        });
+        setSetupCustomerName('');
+        setSetupCustomerPhone('');
+        setSetupCustomerOpening('');
+        setSettingsNotice('Customer saved.');
+      } catch (customerError) {
+        console.error('Unable to save customer', customerError);
+        setError(customerError instanceof Error ? customerError.message : 'Unable to save customer.');
+      }
+    };
+
+    const handleCreateSupplier = async () => {
+      if (!setupSupplierName.trim()) return;
+      setError(null);
+      try {
+        await createSupplierMutation.mutateAsync({
+          name: setupSupplierName.trim(),
+          phoneNumber: setupSupplierPhone.trim() || null,
+          supplyType: setupSupplierType.trim() || null,
+          openingPayable: setupSupplierOpening ? Number(setupSupplierOpening) : 0
+        });
+        setSetupSupplierName('');
+        setSetupSupplierPhone('');
+        setSetupSupplierType('');
+        setSetupSupplierOpening('');
+        setSettingsNotice('Supplier saved.');
+      } catch (supplierError) {
+        console.error('Unable to save supplier', supplierError);
+        setError(supplierError instanceof Error ? supplierError.message : 'Unable to save supplier.');
+      }
+    };
+
+    const handleCreateCustomLedger = async () => {
+      if (!customLedgerCode.trim() || !customLedgerName.trim()) return;
+      setError(null);
+      try {
+        await createLedgerAccountMutation.mutateAsync({
+          code: customLedgerCode.trim().toUpperCase(),
+          name: customLedgerName.trim(),
+          accountType: customLedgerAccountType,
+          parentId: customLedgerParentId || null
+        });
+        setCustomLedgerCode('');
+        setCustomLedgerName('');
+        setCustomLedgerParentId('');
+        setSettingsNotice('Custom ledger created.');
+      } catch (ledgerError) {
+        console.error('Unable to create custom ledger', ledgerError);
+        setError(ledgerError instanceof Error ? ledgerError.message : 'Unable to create custom ledger.');
+      }
+    };
+
+    const beginLedgerEdit = (ledger: LedgerAccount) => {
+      setEditingLedgerId(ledger.id);
+      setEditingLedgerCode(ledger.code);
+      setEditingLedgerName(ledger.name);
+      setEditingLedgerParentId(ledger.parentId ?? '');
+      setSettingsNotice(null);
+      setError(null);
+    };
+
+    const cancelLedgerEdit = () => {
+      setEditingLedgerId(null);
+      setEditingLedgerCode('');
+      setEditingLedgerName('');
+      setEditingLedgerParentId('');
+    };
+
+    const handleSaveLedgerEdit = async () => {
+      if (!editingLedgerId || !editingLedgerCode.trim() || !editingLedgerName.trim()) return;
+      setError(null);
+      try {
+        await updateLedgerAccountMutation.mutateAsync({
+          id: editingLedgerId,
+          updates: {
+            code: editingLedgerCode.trim().toUpperCase(),
+            name: editingLedgerName.trim(),
+            parentId: editingLedgerParentId || null
+          }
+        });
+        setSettingsNotice('Custom ledger updated.');
+        cancelLedgerEdit();
+      } catch (ledgerEditError) {
+        console.error('Unable to update custom ledger', ledgerEditError);
+        setError(ledgerEditError instanceof Error ? ledgerEditError.message : 'Unable to update custom ledger.');
+      }
+    };
+
+    const handleDeactivateCustomLedger = async (ledger: LedgerAccount) => {
+      setError(null);
+      try {
+        await deactivateLedgerAccountMutation.mutateAsync(ledger.id);
+        if (editingLedgerId === ledger.id) cancelLedgerEdit();
+        setSettingsNotice('Custom ledger deactivated.');
+      } catch (ledgerDeactivateError) {
+        console.error('Unable to deactivate custom ledger', ledgerDeactivateError);
+        setError(ledgerDeactivateError instanceof Error ? ledgerDeactivateError.message : 'Unable to deactivate custom ledger.');
+      }
+    };
+
+    const addManualJournalLine = () => {
+      setManualJournalLines((previous) => ([
+        ...previous,
+        { id: `line-${Date.now()}-${previous.length + 1}`, accountId: '', debitAmount: '', creditAmount: '', memo: '' }
+      ]));
+    };
+
+    const removeManualJournalLine = (lineId: string) => {
+      setManualJournalLines((previous) => (
+        previous.length <= 2 ? previous : previous.filter((line) => line.id !== lineId)
+      ));
+    };
+
+    const updateManualJournalLine = (
+      lineId: string,
+      field: 'accountId' | 'debitAmount' | 'creditAmount' | 'memo',
+      value: string
+    ) => {
+      setManualJournalLines((previous) => previous.map((line) => (
+        line.id === lineId ? { ...line, [field]: value } : line
+      )));
+    };
+
+    const handleCreateManualJournalEntry = async () => {
+      if (manualJournalLines.some((line) => !line.accountId)) {
+        setError('Choose accounts for every journal line.');
+        return;
+      }
+
+      const totalsBalanced = Math.abs(manualJournalDebitTotal - manualJournalCreditTotal) < 0.0001;
+      if (!totalsBalanced || manualJournalDebitTotal <= 0 || manualJournalCreditTotal <= 0) {
+        setError('Manual entry must be balanced with non-zero debit and credit totals.');
+        return;
+      }
+
+      setError(null);
+      try {
+        await createManualJournalEntryMutation.mutateAsync({
+          entryDate: `${manualJournalDate}T12:00:00.000Z`,
+          description: manualJournalDescription.trim() || null,
+          lines: manualJournalLines.map((line) => ({
+            accountId: line.accountId,
+            debitAmount: Number(line.debitAmount || 0),
+            creditAmount: Number(line.creditAmount || 0),
+            memo: line.memo.trim() || null
+          }))
+        });
+        setManualJournalDescription('');
+        setManualJournalLines([
+          { id: 'line-1', accountId: '', debitAmount: '', creditAmount: '', memo: '' },
+          { id: 'line-2', accountId: '', debitAmount: '', creditAmount: '', memo: '' }
+        ]);
+        setSettingsNotice(
+          'Manual journal entry submitted. Non-owner entries are posted as needs review until approved.'
+        );
+      } catch (entryError) {
+        console.error('Unable to post manual journal entry', entryError);
+        setError(entryError instanceof Error ? entryError.message : 'Unable to post manual journal entry.');
       }
     };
 
@@ -4103,7 +5577,7 @@ export default function App() {
           <div className="flex items-center justify-between gap-3">
             <div>
               <h1 className="text-2xl font-bold text-gray-900">Settings</h1>
-              <p className="text-gray-500 text-sm">Workspace, preferences, referral rewards, and budget targets</p>
+              <p className="text-gray-500 text-sm">Workspace profile, accounting setup, messaging channels, and referral rewards</p>
             </div>
             <button
               onClick={handleLogout}
@@ -4127,6 +5601,1111 @@ export default function App() {
             </div>
           )}
 
+          <div className="bg-white rounded-3xl border border-gray-200 p-4 shadow-sm">
+            <div className="flex flex-wrap gap-2">
+              {[
+                { id: 'profile', label: 'Business Profile' },
+                { id: 'categories', label: 'Categories' },
+                { id: 'products', label: 'Products & Services' },
+                { id: 'customers', label: 'Customers' },
+                { id: 'suppliers', label: 'Suppliers' },
+                { id: 'ledger', label: 'Accounting Setup' },
+                { id: 'team', label: 'Team' },
+                { id: 'advanced', label: 'Advanced' }
+              ].map((section) => (
+                <button
+                  key={section.id}
+                  onClick={() => setSettingsSection(section.id as typeof settingsSection)}
+                  className={`rounded-full px-4 py-2 text-xs font-semibold ${
+                    settingsSection === section.id
+                      ? 'bg-green-600 text-white'
+                      : 'border border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
+                  }`}
+                >
+                  {section.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {settingsSection === 'profile' && (
+            <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
+              <div className="mb-4 flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold text-gray-900">Business Profile</h2>
+                  <p className="text-sm text-gray-500">Complete onboarding basics and payment context.</p>
+                </div>
+                <button
+                  onClick={handleBootstrapDefaults}
+                  disabled={bootstrapDefaultsMutation.isPending}
+                  className="rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {bootstrapDefaultsMutation.isPending ? 'Preparing...' : 'Load Defaults'}
+                </button>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <input
+                  value={settingsBusinessName}
+                  onChange={(event) => setSettingsBusinessName(event.target.value)}
+                  placeholder="Business name"
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                />
+                <input
+                  value={settingsBusinessType}
+                  onChange={(event) => setSettingsBusinessType(event.target.value)}
+                  placeholder="Business type"
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                />
+                <input
+                  value={settingsTimezone}
+                  onChange={(event) => setSettingsTimezone(event.target.value)}
+                  placeholder="Timezone"
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                />
+                <select
+                  value={settingsCurrencyCode}
+                  onChange={(event) => setSettingsCurrencyCode(event.target.value as typeof settingsCurrencyCode)}
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                >
+                  {['GHS', 'USD', 'NGN', 'KES', 'EUR', 'GBP'].map((currency) => (
+                    <option key={currency} value={currency}>{currency}</option>
+                  ))}
+                </select>
+                <select
+                  value={settingsPreferredTime}
+                  onChange={(event) => setSettingsPreferredTime(event.target.value as typeof settingsPreferredTime)}
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                >
+                  <option value="morning">Morning check-in</option>
+                  <option value="afternoon">Afternoon check-in</option>
+                  <option value="evening">Evening check-in</option>
+                </select>
+              </div>
+              <div className="mt-4">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Preferred check-up time</p>
+                <p className="text-sm text-gray-500">Akonta uses this to decide when to nudge the owner to review or update records.</p>
+              </div>
+              <div className="mt-4">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Payment Methods</p>
+                <div className="flex flex-wrap gap-2">
+                  {setupPaymentOptions.map((option) => {
+                    const selected = settingsPaymentMethods.includes(option.value);
+                    return (
+                      <button
+                        key={option.value}
+                        onClick={() => {
+                          setSettingsPaymentMethods((previous) => (
+                            previous.includes(option.value)
+                              ? previous.filter((entry) => entry !== option.value)
+                              : [...previous, option.value]
+                          ));
+                        }}
+                        className={`rounded-full px-3 py-1.5 text-xs font-semibold ${
+                          selected ? 'bg-green-600 text-white' : 'border border-gray-300 bg-white text-gray-700'
+                        }`}
+                      >
+                        {option.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                <div className="rounded-2xl bg-gray-50 px-3 py-3 text-center">
+                  <p className="text-xs text-gray-500">Products</p>
+                  <p className="mt-1 text-lg font-bold text-gray-900">{settingsProfile?.setupCounts.products ?? '-'}</p>
+                </div>
+                <div className="rounded-2xl bg-gray-50 px-3 py-3 text-center">
+                  <p className="text-xs text-gray-500">Customers</p>
+                  <p className="mt-1 text-lg font-bold text-gray-900">{settingsProfile?.setupCounts.customers ?? '-'}</p>
+                </div>
+                <div className="rounded-2xl bg-gray-50 px-3 py-3 text-center">
+                  <p className="text-xs text-gray-500">Suppliers</p>
+                  <p className="mt-1 text-lg font-bold text-gray-900">{settingsProfile?.setupCounts.suppliers ?? '-'}</p>
+                </div>
+              </div>
+              <button
+                onClick={handleSaveBusinessProfile}
+                disabled={isAnySettingsActionPending || settingsPaymentMethods.length === 0}
+                className="mt-4 inline-flex items-center justify-center rounded-2xl bg-green-500 px-5 py-3 text-sm font-semibold text-white hover:bg-green-600 disabled:opacity-50"
+              >
+                Save Business Profile
+              </button>
+            </div>
+          )}
+
+          {settingsSection === 'categories' && (
+            <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
+              <h2 className="text-lg font-semibold text-gray-900">Categories</h2>
+              <p className="mb-4 text-sm text-gray-500">Sales and expense categories used for cleaner classification and reports.</p>
+              <div className="grid gap-3 sm:grid-cols-[180px_1fr_auto]">
+                <select
+                  value={setupCategoryKind}
+                  onChange={(event) => setSetupCategoryKind(event.target.value as 'sales' | 'expense')}
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                >
+                  <option value="sales">Sales</option>
+                  <option value="expense">Expense</option>
+                </select>
+                <input
+                  value={setupCategoryName}
+                  onChange={(event) => setSetupCategoryName(event.target.value)}
+                  placeholder="Category name"
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                />
+                <button
+                  onClick={handleCreateCategory}
+                  disabled={createCategoryMutation.isPending || !setupCategoryName.trim()}
+                  className="rounded-2xl bg-green-500 px-4 py-3 text-xs font-semibold text-white hover:bg-green-600 disabled:opacity-50"
+                >
+                  Add
+                </button>
+              </div>
+              <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                {settingsCategories.map((category) => (
+                  <div key={category.id} className="rounded-2xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                    <span className="font-semibold">{category.name}</span>
+                    <span className="ml-2 text-xs text-gray-500 uppercase">{category.kind}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {settingsSection === 'products' && (
+            <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
+              <h2 className="text-lg font-semibold text-gray-900">Products & Services</h2>
+              <p className="mb-4 text-sm text-gray-500">Optional setup to improve product/service profitability insights.</p>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <input
+                  value={setupProductName}
+                  onChange={(event) => setSetupProductName(event.target.value)}
+                  placeholder="Name (e.g. Braids, Meat Pie)"
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                />
+                <select
+                  value={setupProductType}
+                  onChange={(event) => setSetupProductType(event.target.value as 'product' | 'service')}
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                >
+                  <option value="product">Product</option>
+                  <option value="service">Service</option>
+                </select>
+                <input
+                  value={setupProductDefaultPrice}
+                  onChange={(event) => setSetupProductDefaultPrice(event.target.value)}
+                  placeholder="Default price (optional)"
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                />
+                <input
+                  value={setupProductEstimatedCost}
+                  onChange={(event) => setSetupProductEstimatedCost(event.target.value)}
+                  placeholder="Estimated cost (optional)"
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                />
+                <select
+                  value={setupProductCategoryId}
+                  onChange={(event) => setSetupProductCategoryId(event.target.value)}
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm sm:col-span-2"
+                >
+                  <option value="">No category</option>
+                  {settingsCategories.map((category) => (
+                    <option key={category.id} value={category.id}>{category.name} ({category.kind})</option>
+                  ))}
+                </select>
+              </div>
+              <button
+                onClick={handleCreateProduct}
+                disabled={createProductMutation.isPending || !setupProductName.trim()}
+                className="mt-4 rounded-2xl bg-green-500 px-4 py-3 text-xs font-semibold text-white hover:bg-green-600 disabled:opacity-50"
+              >
+                Add Product/Service
+              </button>
+              <div className="mt-4 space-y-2">
+                {settingsProducts.map((entry) => (
+                  <div key={entry.id} className="rounded-2xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                    <span className="font-semibold">{entry.name}</span>
+                    <span className="ml-2 text-xs uppercase text-gray-500">{entry.type}</span>
+                    {entry.defaultPrice ? <span className="ml-2 text-xs text-gray-500">Price: {formatCurrencyValue(entry.defaultPrice, activeCurrencyCode)}</span> : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {settingsSection === 'customers' && (
+            <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
+              <h2 className="text-lg font-semibold text-gray-900">Customers</h2>
+              <p className="mb-4 text-sm text-gray-500">Optional customer setup for debtor tracking and cleaner chat interpretation.</p>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <input
+                  value={setupCustomerName}
+                  onChange={(event) => setSetupCustomerName(event.target.value)}
+                  placeholder="Customer name"
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                />
+                <input
+                  value={setupCustomerPhone}
+                  onChange={(event) => setSetupCustomerPhone(event.target.value)}
+                  placeholder="Phone (optional)"
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                />
+                <input
+                  value={setupCustomerOpening}
+                  onChange={(event) => setSetupCustomerOpening(event.target.value)}
+                  placeholder="Opening amount owed (optional)"
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                />
+              </div>
+              <button
+                onClick={handleCreateCustomer}
+                disabled={createCustomerMutation.isPending || !setupCustomerName.trim()}
+                className="mt-4 rounded-2xl bg-green-500 px-4 py-3 text-xs font-semibold text-white hover:bg-green-600 disabled:opacity-50"
+              >
+                Add Customer
+              </button>
+              <div className="mt-4 space-y-2">
+                {settingsCustomers.map((entry) => (
+                  <div key={entry.id} className="rounded-2xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                    <span className="font-semibold">{entry.name}</span>
+                    {entry.phoneNumber ? <span className="ml-2 text-xs text-gray-500">{entry.phoneNumber}</span> : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {settingsSection === 'suppliers' && (
+            <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
+              <h2 className="text-lg font-semibold text-gray-900">Suppliers</h2>
+              <p className="mb-4 text-sm text-gray-500">Optional supplier setup for payables and supplier-credit classifications.</p>
+              <div className="grid gap-3 sm:grid-cols-4">
+                <input
+                  value={setupSupplierName}
+                  onChange={(event) => setSetupSupplierName(event.target.value)}
+                  placeholder="Supplier name"
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                />
+                <input
+                  value={setupSupplierPhone}
+                  onChange={(event) => setSetupSupplierPhone(event.target.value)}
+                  placeholder="Phone (optional)"
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                />
+                <input
+                  value={setupSupplierType}
+                  onChange={(event) => setSetupSupplierType(event.target.value)}
+                  placeholder="What they supply (optional)"
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                />
+                <input
+                  value={setupSupplierOpening}
+                  onChange={(event) => setSetupSupplierOpening(event.target.value)}
+                  placeholder="Opening amount owed (optional)"
+                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                />
+              </div>
+              <button
+                onClick={handleCreateSupplier}
+                disabled={createSupplierMutation.isPending || !setupSupplierName.trim()}
+                className="mt-4 rounded-2xl bg-green-500 px-4 py-3 text-xs font-semibold text-white hover:bg-green-600 disabled:opacity-50"
+              >
+                Add Supplier
+              </button>
+              <div className="mt-4 space-y-2">
+                {settingsSuppliers.map((entry) => (
+                  <div key={entry.id} className="rounded-2xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                    <span className="font-semibold">{entry.name}</span>
+                    {entry.supplyType ? <span className="ml-2 text-xs text-gray-500">{entry.supplyType}</span> : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {settingsSection === 'ledger' && (
+            <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
+              <div className="mb-4 flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold text-gray-900">Accounting Setup</h2>
+                  <p className="text-sm text-gray-500">Default ledgers, monthly budgets, reconciliations, and journal visibility for this workspace.</p>
+                </div>
+                <button
+                  onClick={() => void settingsLedgerAccountsQuery.refetch()}
+                  disabled={settingsLedgerAccountsQuery.isFetching}
+                  className="rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {settingsLedgerAccountsQuery.isFetching ? 'Refreshing...' : 'Refresh'}
+                </button>
+              </div>
+
+              <div className="mb-4 grid gap-3 sm:grid-cols-3">
+                <div className="rounded-2xl bg-gray-50 px-4 py-3">
+                  <p className="text-xs uppercase tracking-wide text-gray-500">Active ledgers</p>
+                  <p className="mt-2 text-2xl font-bold text-gray-900">{settingsLedgerAccounts.length}</p>
+                </div>
+                <div className="rounded-2xl bg-gray-50 px-4 py-3">
+                  <p className="text-xs uppercase tracking-wide text-gray-500">System defaults</p>
+                  <p className="mt-2 text-2xl font-bold text-gray-900">
+                    {settingsLedgerAccounts.filter((entry) => entry.isSystemDefault).length}
+                  </p>
+                </div>
+                <div className="rounded-2xl bg-gray-50 px-4 py-3">
+                  <p className="text-xs uppercase tracking-wide text-gray-500">Custom ledgers</p>
+                  <p className="mt-2 text-2xl font-bold text-gray-900">
+                    {settingsLedgerAccounts.filter((entry) => !entry.isSystemDefault).length}
+                  </p>
+                </div>
+              </div>
+
+              <div className="mb-6 rounded-2xl border border-gray-200 bg-gray-50 p-4">
+                <h3 className="text-sm font-semibold text-gray-900">Add Custom Ledger</h3>
+                <p className="mt-1 text-xs text-gray-500">
+                  Create additional ledgers for this business without touching system defaults.
+                </p>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <input
+                    value={customLedgerCode}
+                    onChange={(event) => setCustomLedgerCode(event.target.value)}
+                    placeholder="Code (e.g. 1150)"
+                    className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                  />
+                  <input
+                    value={customLedgerName}
+                    onChange={(event) => setCustomLedgerName(event.target.value)}
+                    placeholder="Ledger name"
+                    className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                  />
+                  <select
+                    value={customLedgerAccountType}
+                    onChange={(event) => {
+                      setCustomLedgerAccountType(event.target.value as typeof customLedgerAccountType);
+                      setCustomLedgerParentId('');
+                    }}
+                    className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                  >
+                    <option value="asset">Asset</option>
+                    <option value="liability">Liability</option>
+                    <option value="equity">Equity</option>
+                    <option value="income">Income</option>
+                    <option value="expense">Expense</option>
+                  </select>
+                  <select
+                    value={customLedgerParentId}
+                    onChange={(event) => setCustomLedgerParentId(event.target.value)}
+                    className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                  >
+                    <option value="">No parent</option>
+                    {customLedgerParentCandidates.map((entry) => (
+                      <option key={entry.id} value={entry.id}>
+                        {entry.code} {entry.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  onClick={() => void handleCreateCustomLedger()}
+                  disabled={createLedgerAccountMutation.isPending || !customLedgerCode.trim() || !customLedgerName.trim()}
+                  className="mt-3 rounded-2xl bg-green-600 px-4 py-3 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-50"
+                >
+                  {createLedgerAccountMutation.isPending ? 'Creating...' : 'Create Custom Ledger'}
+                </button>
+              </div>
+
+              {editingLedger && (
+                <div className="mb-6 rounded-2xl border border-blue-200 bg-blue-50 p-4">
+                  <h3 className="text-sm font-semibold text-gray-900">Edit Custom Ledger</h3>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    <input
+                      value={editingLedgerCode}
+                      onChange={(event) => setEditingLedgerCode(event.target.value)}
+                      placeholder="Code"
+                      className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                    />
+                    <input
+                      value={editingLedgerName}
+                      onChange={(event) => setEditingLedgerName(event.target.value)}
+                      placeholder="Ledger name"
+                      className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                    />
+                    <input
+                      value={editingLedger.accountType}
+                      disabled
+                      className="w-full rounded-2xl border-gray-200 bg-gray-100 px-4 py-3 text-sm text-gray-600"
+                    />
+                    <select
+                      value={editingLedgerParentId}
+                      onChange={(event) => setEditingLedgerParentId(event.target.value)}
+                      className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                    >
+                      <option value="">No parent</option>
+                      {editingLedgerParentCandidates.map((entry) => (
+                        <option key={entry.id} value={entry.id}>
+                          {entry.code} {entry.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      onClick={() => void handleSaveLedgerEdit()}
+                      disabled={updateLedgerAccountMutation.isPending || !editingLedgerCode.trim() || !editingLedgerName.trim()}
+                      className="rounded-2xl bg-green-600 px-4 py-2 text-xs font-semibold text-white hover:bg-green-700 disabled:opacity-50"
+                    >
+                      {updateLedgerAccountMutation.isPending ? 'Saving...' : 'Save changes'}
+                    </button>
+                    <button
+                      onClick={cancelLedgerEdit}
+                      className="rounded-2xl border border-gray-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {settingsLedgerAccountsQuery.isLoading ? (
+                <p className="text-sm text-gray-500">Loading accounting setup...</p>
+              ) : settingsLedgerAccountsQuery.isError ? (
+                <p className="text-sm text-red-600">Unable to load chart of accounts right now.</p>
+              ) : groupedLedgerAccounts.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-gray-300 bg-gray-50 px-4 py-6 text-sm text-gray-600">
+                  No ledger accounts found yet. Use `Load Defaults` in Business Profile to seed the default chart.
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {groupedLedgerAccounts.map((group) => (
+                    <div key={group.accountType} className="rounded-2xl border border-gray-200">
+                      <div className="border-b border-gray-200 px-4 py-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-700">{group.label}</h3>
+                          <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-semibold text-gray-600">
+                            {group.accounts.length} account{group.accounts.length === 1 ? '' : 's'}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="divide-y divide-gray-100">
+                        {group.accounts.map((account) => (
+                          <div key={account.id} className="grid gap-2 px-4 py-3 sm:grid-cols-[100px_1fr_auto] sm:items-center">
+                            <p className="text-sm font-semibold text-gray-900">{account.code}</p>
+                            <div>
+                              <p className="text-sm text-gray-900">{account.name}</p>
+                              <p className="text-xs text-gray-500">
+                                {account.parentId ? 'Child ledger' : 'Primary ledger'}
+                              </p>
+                            </div>
+                            <div className="flex items-center justify-end gap-2">
+                              <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                                account.isSystemDefault
+                                  ? 'bg-blue-100 text-blue-700'
+                                  : 'bg-emerald-100 text-emerald-700'
+                              }`}>
+                                {account.isSystemDefault ? 'Default' : 'Custom'}
+                              </span>
+                              {!account.isSystemDefault && (
+                                <>
+                                  <button
+                                    onClick={() => beginLedgerEdit(account)}
+                                    className="rounded-full border border-gray-300 bg-white px-3 py-1 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                                  >
+                                    Edit
+                                  </button>
+                                  <button
+                                    onClick={() => void handleDeactivateCustomLedger(account)}
+                                    disabled={deactivateLedgerAccountMutation.isPending}
+                                    className="rounded-full border border-rose-300 bg-white px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                                  >
+                                    Deactivate
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                This is the safe first release of accounting visibility. Posted journals now flow into a read-only balance sheet snapshot.
+              </div>
+
+              <div className="mt-6 border-t border-gray-200 pt-6">
+                <div className="mb-4 flex items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-base font-semibold text-gray-900">Monthly Budget Target</h3>
+                    <p className="text-sm text-gray-500">Keep revenue targets and expense limits inside the accounting workflow.</p>
+                  </div>
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Budget type</label>
+                    <select
+                      value={budgetTargetType}
+                      onChange={(e) => setBudgetTargetType(e.target.value as BudgetTargetType)}
+                      className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                    >
+                      <option value="expense">Expense budget</option>
+                      <option value="revenue">Revenue target</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Amount ({activeCurrencyCode})</label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={budgetAmount}
+                      onChange={(e) => setBudgetAmount(e.target.value)}
+                      className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
+                    />
+                  </div>
+                </div>
+                {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
+                <button
+                  onClick={handleSaveBudget}
+                  disabled={isAnySettingsActionPending || !budgetAmount}
+                  className="mt-4 inline-flex items-center justify-center rounded-2xl bg-green-500 px-5 py-3 text-sm font-semibold text-white hover:bg-green-600 disabled:opacity-50"
+                >
+                  {isSavingBudget ? 'Saving...' : 'Save Budget'}
+                </button>
+
+                <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4">
+                  <h4 className="text-sm font-semibold text-gray-900">Current monthly budgets</h4>
+                  {budgets.length === 0 ? (
+                    <p className="mt-2 text-sm text-gray-500">No budget targets set yet for this month.</p>
+                  ) : (
+                    <div className="mt-3 space-y-3">
+                      {budgets.map((budget) => (
+                        <div key={budget.id} className="rounded-2xl border border-gray-200 bg-white p-4">
+                          <p className="text-sm text-gray-500 capitalize">{budget.targetType} budget</p>
+                          <p className="text-xl font-semibold text-gray-900">{formatCurrency(budget.amount)}</p>
+                          {budget.category && <p className="text-sm text-gray-500">Category: {budget.category}</p>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 px-4 py-4 text-sm text-gray-600">
+                  Set a monthly expense budget or revenue target and Akonta AI will watch your numbers while you record transactions.
+                </div>
+              </div>
+
+              <div className="mt-6 border-t border-gray-200 pt-6">
+                <div className="mb-4">
+                  <h3 className="text-base font-semibold text-gray-900">Cash and MoMo Reconciliation</h3>
+                  <p className="text-sm text-gray-500">Compare posted book balances against the actual cash counted or wallet balance observed right now.</p>
+                </div>
+
+                <label className="mb-4 block max-w-xs">
+                  <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-gray-500">Reconciliation date</span>
+                  <input
+                    type="date"
+                    value={reconciliationAsOfDate}
+                    onChange={(event) => setReconciliationAsOfDate(event.target.value)}
+                    className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm"
+                  />
+                </label>
+
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <div className="rounded-3xl border border-gray-200 bg-white p-5">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <h4 className="text-sm font-semibold uppercase tracking-wide text-gray-700">Cash reconciliation</h4>
+                        <p className="mt-1 text-xs text-gray-500">Book balance comes from ledger `1000 Cash`.</p>
+                      </div>
+                      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${varianceTone(cashVariance)}`}>
+                        {varianceLabel(cashVariance)}
+                      </span>
+                    </div>
+
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                      <div className="rounded-2xl bg-gray-50 px-4 py-3">
+                        <p className="text-xs uppercase tracking-wide text-gray-500">Book balance</p>
+                        <p className="mt-2 text-xl font-bold text-gray-900">{formatCurrency(cashBookBalance)}</p>
+                      </div>
+                      <label className="rounded-2xl bg-gray-50 px-4 py-3">
+                        <span className="text-xs uppercase tracking-wide text-gray-500">Actual counted cash</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={cashActualBalanceInput}
+                          onChange={(event) => setCashActualBalanceInput(event.target.value)}
+                          placeholder="Enter counted cash"
+                          className="mt-2 w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm"
+                        />
+                      </label>
+                    </div>
+
+                    <div className="mt-3 rounded-2xl border border-gray-200 px-4 py-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-sm text-gray-600">Variance</p>
+                        <p className="text-sm font-bold text-gray-900">
+                          {cashVariance === null ? '-' : formatCurrency(cashVariance)}
+                        </p>
+                      </div>
+                    </div>
+
+                    <label className="mt-3 block">
+                      <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-gray-500">Notes</span>
+                      <textarea
+                        value={cashReconciliationNotes}
+                        onChange={(event) => setCashReconciliationNotes(event.target.value)}
+                        rows={3}
+                        placeholder="Count notes, shortages, overages, or follow-up actions"
+                        className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm"
+                      />
+                    </label>
+
+                    <button
+                      onClick={() => void saveReconciliationSession('cash')}
+                      disabled={createReconciliationSessionMutation.isPending}
+                      className="mt-3 rounded-2xl bg-green-600 px-4 py-3 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-50"
+                    >
+                      {createReconciliationSessionMutation.isPending ? 'Saving...' : 'Save cash reconciliation'}
+                    </button>
+
+                    <div className="mt-4">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Recent cash-impact transactions</p>
+                      <div className="mt-2 space-y-2">
+                        {recentCashTransactions.length === 0 ? (
+                          <p className="text-sm text-gray-500">No recent cash-impact transactions found.</p>
+                        ) : (
+                          recentCashTransactions.map((tx) => (
+                            <div key={tx.id} className="rounded-2xl bg-gray-50 px-3 py-2">
+                              <div className="flex items-center justify-between gap-3">
+                                <div>
+                                  <p className="text-sm font-medium text-gray-900">{tx.eventType?.replace(/_/g, ' ') || tx.type}</p>
+                                  <p className="text-xs text-gray-500">{formatDate(new Date(tx.date))}</p>
+                                </div>
+                                <button
+                                  onClick={() => openTransactionDrilldown(tx.id)}
+                                  className="text-xs font-semibold text-green-700 hover:text-green-800"
+                                >
+                                  Open
+                                </button>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Saved cash reconciliations</p>
+                      <div className="mt-2 space-y-2">
+                        {recentCashReconciliationSessions.length === 0 ? (
+                          <p className="text-sm text-gray-500">No saved cash reconciliations yet.</p>
+                        ) : (
+                          recentCashReconciliationSessions.map((session) => (
+                            <div key={session.id} className="rounded-2xl bg-gray-50 px-3 py-3 text-sm text-gray-700">
+                              <div className="flex items-center justify-between gap-3">
+                                <p className="font-medium text-gray-900">{formatDate(new Date(session.asOf))}</p>
+                                <span className={`rounded-full px-3 py-1 text-xs font-semibold ${varianceTone(session.variance)}`}>
+                                  {varianceLabel(session.variance)}
+                                </span>
+                              </div>
+                              <p className="mt-1 text-xs text-gray-500">
+                                Book {formatCurrency(session.bookBalance)} • Counted {formatCurrency(session.countedBalance)}
+                              </p>
+                              {session.notes && <p className="mt-2 text-xs text-gray-600">{session.notes}</p>}
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-3xl border border-gray-200 bg-white p-5">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <h4 className="text-sm font-semibold uppercase tracking-wide text-gray-700">MoMo reconciliation</h4>
+                        <p className="mt-1 text-xs text-gray-500">Book balance comes from ledger `1010 Mobile Money`.</p>
+                      </div>
+                      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${varianceTone(momoVariance)}`}>
+                        {varianceLabel(momoVariance)}
+                      </span>
+                    </div>
+
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                      <div className="rounded-2xl bg-gray-50 px-4 py-3">
+                        <p className="text-xs uppercase tracking-wide text-gray-500">Book balance</p>
+                        <p className="mt-2 text-xl font-bold text-gray-900">{formatCurrency(momoBookBalance)}</p>
+                      </div>
+                      <label className="rounded-2xl bg-gray-50 px-4 py-3">
+                        <span className="text-xs uppercase tracking-wide text-gray-500">Actual wallet balance</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={momoActualBalanceInput}
+                          onChange={(event) => setMomoActualBalanceInput(event.target.value)}
+                          placeholder="Enter wallet balance"
+                          className="mt-2 w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm"
+                        />
+                      </label>
+                    </div>
+
+                    <div className="mt-3 rounded-2xl border border-gray-200 px-4 py-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-sm text-gray-600">Variance</p>
+                        <p className="text-sm font-bold text-gray-900">
+                          {momoVariance === null ? '-' : formatCurrency(momoVariance)}
+                        </p>
+                      </div>
+                    </div>
+
+                    <label className="mt-3 block">
+                      <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-gray-500">Notes</span>
+                      <textarea
+                        value={momoReconciliationNotes}
+                        onChange={(event) => setMomoReconciliationNotes(event.target.value)}
+                        rows={3}
+                        placeholder="Provider statement notes, pending transfers, or follow-up actions"
+                        className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm"
+                      />
+                    </label>
+
+                    <button
+                      onClick={() => void saveReconciliationSession('momo')}
+                      disabled={createReconciliationSessionMutation.isPending}
+                      className="mt-3 rounded-2xl bg-green-600 px-4 py-3 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-50"
+                    >
+                      {createReconciliationSessionMutation.isPending ? 'Saving...' : 'Save MoMo reconciliation'}
+                    </button>
+
+                    <div className="mt-4">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Recent MoMo-impact transactions</p>
+                      <div className="mt-2 space-y-2">
+                        {recentMomoTransactions.length === 0 ? (
+                          <p className="text-sm text-gray-500">No recent MoMo transactions found.</p>
+                        ) : (
+                          recentMomoTransactions.map((tx) => (
+                            <div key={tx.id} className="rounded-2xl bg-gray-50 px-3 py-2">
+                              <div className="flex items-center justify-between gap-3">
+                                <div>
+                                  <p className="text-sm font-medium text-gray-900">{tx.eventType?.replace(/_/g, ' ') || tx.type}</p>
+                                  <p className="text-xs text-gray-500">{formatDate(new Date(tx.date))}</p>
+                                </div>
+                                <button
+                                  onClick={() => openTransactionDrilldown(tx.id)}
+                                  className="text-xs font-semibold text-green-700 hover:text-green-800"
+                                >
+                                  Open
+                                </button>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Saved MoMo reconciliations</p>
+                      <div className="mt-2 space-y-2">
+                        {recentMomoReconciliationSessions.length === 0 ? (
+                          <p className="text-sm text-gray-500">No saved MoMo reconciliations yet.</p>
+                        ) : (
+                          recentMomoReconciliationSessions.map((session) => (
+                            <div key={session.id} className="rounded-2xl bg-gray-50 px-3 py-3 text-sm text-gray-700">
+                              <div className="flex items-center justify-between gap-3">
+                                <p className="font-medium text-gray-900">{formatDate(new Date(session.asOf))}</p>
+                                <span className={`rounded-full px-3 py-1 text-xs font-semibold ${varianceTone(session.variance)}`}>
+                                  {varianceLabel(session.variance)}
+                                </span>
+                              </div>
+                              <p className="mt-1 text-xs text-gray-500">
+                                Book {formatCurrency(session.bookBalance)} • Counted {formatCurrency(session.countedBalance)}
+                              </p>
+                              {session.notes && <p className="mt-2 text-xs text-gray-600">{session.notes}</p>}
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-6 border-t border-gray-200 pt-6">
+                <div className="mb-4 flex items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-base font-semibold text-gray-900">Posting Diagnostics</h3>
+                    <p className="text-sm text-gray-500">Exceptions and review items that may stop the books from reflecting a transaction correctly.</p>
+                  </div>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                  <div className="rounded-2xl bg-amber-50 px-4 py-3">
+                    <p className="text-xs uppercase tracking-wide text-amber-700">Not configured</p>
+                    <p className="mt-2 text-2xl font-bold text-amber-900">{ledgerDiagnosticCounts.notConfigured}</p>
+                  </div>
+                  <div className="rounded-2xl bg-rose-50 px-4 py-3">
+                    <p className="text-xs uppercase tracking-wide text-rose-700">Failed</p>
+                    <p className="mt-2 text-2xl font-bold text-rose-900">{ledgerDiagnosticCounts.failed}</p>
+                  </div>
+                  <div className="rounded-2xl bg-gray-100 px-4 py-3">
+                    <p className="text-xs uppercase tracking-wide text-gray-600">Skipped</p>
+                    <p className="mt-2 text-2xl font-bold text-gray-900">{ledgerDiagnosticCounts.skipped}</p>
+                  </div>
+                  <div className="rounded-2xl bg-blue-50 px-4 py-3">
+                    <p className="text-xs uppercase tracking-wide text-blue-700">Pending</p>
+                    <p className="mt-2 text-2xl font-bold text-blue-900">{ledgerDiagnosticCounts.pending}</p>
+                  </div>
+                  <div className="rounded-2xl bg-purple-50 px-4 py-3">
+                    <p className="text-xs uppercase tracking-wide text-purple-700">Needs review</p>
+                    <p className="mt-2 text-2xl font-bold text-purple-900">{ledgerDiagnosticCounts.needsReview}</p>
+                  </div>
+                </div>
+
+                {ledgerDiagnosticTransactions.length === 0 && ledgerDiagnosticCounts.needsReview === 0 ? (
+                  <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-4 text-sm text-emerald-800">
+                    No posting exceptions right now. Confirmed transactions are flowing into the journals as expected.
+                  </div>
+                ) : (
+                  <div className="mt-4 space-y-3">
+                    {ledgerDiagnosticTransactions.map((transaction) => (
+                      <div key={transaction.id} className="rounded-2xl border border-gray-200 bg-gray-50 p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-semibold text-gray-900">
+                              {transaction.category || transaction.eventType?.replace(/_/g, ' ') || transaction.type}
+                            </p>
+                            <p className="mt-1 text-xs text-gray-500">
+                              {formatDate(new Date(transaction.date))} • {formatCurrency(transaction.amount)}
+                            </p>
+                          </div>
+                          <span className={`rounded-full px-3 py-1 text-xs font-semibold ${ledgerDiagnosticTone(transaction.ledgerPostingStatus)}`}>
+                            {(transaction.ledgerPostingStatus ?? 'unknown').replace(/_/g, ' ')}
+                          </span>
+                        </div>
+                        <p className="mt-3 text-sm text-gray-600">{describeLedgerDiagnostic(transaction)}</p>
+                        <div className="mt-3">
+                          <button
+                            onClick={() => openTransactionDrilldown(transaction.id)}
+                            className="text-xs font-semibold text-green-700 hover:text-green-800"
+                          >
+                            Open source transaction
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+
+                    {ledgerDiagnosticCounts.needsReview > 0 && (
+                      <div className="rounded-2xl border border-purple-200 bg-purple-50 px-4 py-4 text-sm text-purple-900">
+                        {ledgerDiagnosticCounts.needsReview} journal entr{ledgerDiagnosticCounts.needsReview === 1 ? 'y is' : 'ies are'} marked
+                        {' '}`needs review`. These are posted but still deserve accounting attention because the source transaction was flagged for review.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-6 border-t border-gray-200 pt-6">
+                <div className="mb-4">
+                  <h3 className="text-base font-semibold text-gray-900">Manual Ledger Entry</h3>
+                  <p className="text-sm text-gray-500">
+                    Post a direct double-entry adjustment, for example moving funds from MoMo to cash or capturing a skipped transaction.
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-gray-500">Entry date</span>
+                      <input
+                        type="date"
+                        value={manualJournalDate}
+                        onChange={(event) => setManualJournalDate(event.target.value)}
+                        className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-gray-500">Description</span>
+                      <input
+                        value={manualJournalDescription}
+                        onChange={(event) => setManualJournalDescription(event.target.value)}
+                        placeholder="Fund transfer, correction, or adjustment"
+                        className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="mt-4 space-y-3">
+                    {manualJournalLines.map((line, index) => (
+                      <div key={line.id} className="rounded-2xl border border-gray-200 bg-white p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Line {index + 1}</p>
+                          {manualJournalLines.length > 2 && (
+                            <button
+                              onClick={() => removeManualJournalLine(line.id)}
+                              className="rounded-full border border-rose-300 bg-white px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
+                            >
+                              Remove
+                            </button>
+                          )}
+                        </div>
+                        <div className="mt-2 space-y-2">
+                          <select
+                            value={line.accountId}
+                            onChange={(event) => updateManualJournalLine(line.id, 'accountId', event.target.value)}
+                            className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm"
+                          >
+                            <option value="">Select account</option>
+                            {settingsLedgerAccounts.filter((entry) => entry.isActive).map((entry) => (
+                              <option key={entry.id} value={entry.id}>{entry.code} {entry.name}</option>
+                            ))}
+                          </select>
+                          <div className="grid grid-cols-2 gap-2">
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={line.debitAmount}
+                              onChange={(event) => updateManualJournalLine(line.id, 'debitAmount', event.target.value)}
+                              placeholder="Debit"
+                              className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm"
+                            />
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={line.creditAmount}
+                              onChange={(event) => updateManualJournalLine(line.id, 'creditAmount', event.target.value)}
+                              placeholder="Credit"
+                              className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm"
+                            />
+                          </div>
+                          <input
+                            value={line.memo}
+                            onChange={(event) => updateManualJournalLine(line.id, 'memo', event.target.value)}
+                            placeholder="Memo (optional)"
+                            className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm"
+                          />
+                        </div>
+                      </div>
+                    ))}
+                    <button
+                      onClick={addManualJournalLine}
+                      className="rounded-2xl border border-gray-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                    >
+                      Add line
+                    </button>
+                  </div>
+
+                  <div className="mt-3 rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-700">
+                    Debits: <span className="font-semibold">{formatCurrency(manualJournalDebitTotal || 0)}</span>
+                    {' '}• Credits: <span className="font-semibold">{formatCurrency(manualJournalCreditTotal || 0)}</span>
+                    {' '}• Status:{' '}
+                    <span className={`font-semibold ${
+                      Math.abs(manualJournalDebitTotal - manualJournalCreditTotal) < 0.0001 && manualJournalDebitTotal > 0
+                        ? 'text-green-700'
+                        : 'text-amber-700'
+                    }`}>
+                      {Math.abs(manualJournalDebitTotal - manualJournalCreditTotal) < 0.0001 && manualJournalDebitTotal > 0
+                        ? 'Balanced'
+                        : 'Not balanced'}
+                    </span>
+                  </div>
+
+                  <button
+                    onClick={() => void handleCreateManualJournalEntry()}
+                    disabled={createManualJournalEntryMutation.isPending}
+                    className="mt-3 rounded-2xl bg-green-600 px-4 py-3 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-50"
+                  >
+                    {createManualJournalEntryMutation.isPending ? 'Posting...' : 'Post Manual Entry'}
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-6 border-t border-gray-200 pt-6">
+                <div className="mb-4 flex items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-base font-semibold text-gray-900">Recent Journal Entries</h3>
+                    <p className="text-sm text-gray-500">Auto-generated postings from confirmed transactions.</p>
+                  </div>
+                  <button
+                    onClick={() => void settingsJournalEntriesQuery.refetch()}
+                    disabled={settingsJournalEntriesQuery.isFetching}
+                    className="rounded-full border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    {settingsJournalEntriesQuery.isFetching ? 'Refreshing...' : 'Refresh'}
+                  </button>
+                </div>
+
+                {settingsJournalEntriesQuery.isLoading ? (
+                  <p className="text-sm text-gray-500">Loading journal entries...</p>
+                ) : settingsJournalEntriesQuery.isError ? (
+                  <p className="text-sm text-red-600">Unable to load journal entries right now.</p>
+                ) : settingsJournalEntries.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-gray-300 bg-gray-50 px-4 py-6 text-sm text-gray-600">
+                    No journal entries yet. Confirm a transaction to generate accounting postings.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {settingsJournalEntries.map((entry) => (
+                      <div
+                        key={entry.id}
+                        className={`rounded-2xl border p-4 ${
+                          focusedJournalEntryId === entry.id
+                            ? 'border-green-400 bg-green-50 shadow-sm shadow-green-100'
+                            : 'border-gray-200 bg-gray-50'
+                        }`}
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-semibold text-gray-900">{entry.description || 'Journal entry'}</p>
+                            <p className="mt-1 text-xs text-gray-500">
+                              {formatDate(new Date(entry.entryDate))}
+                              {entry.transaction ? ` • ${entry.transaction.eventType.replace(/_/g, ' ')}` : ''}
+                            </p>
+                          </div>
+                          <div className="text-right">
+                            <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                              entry.status === 'posted'
+                                ? 'bg-green-100 text-green-700'
+                                : entry.status === 'needs_review'
+                                  ? 'bg-amber-100 text-amber-700'
+                                  : 'bg-gray-200 text-gray-700'
+                            }`}>
+                              {entry.status.replace(/_/g, ' ')}
+                            </span>
+                            {entry.transaction && (
+                              <p className="mt-2 text-xs text-gray-500">
+                                Tx {entry.transaction.ledgerPostingStatus}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                        <div className="mt-3 space-y-2">
+                          {entry.lines.map((line) => (
+                            <div key={line.id} className="rounded-xl bg-white px-3 py-2 text-xs text-gray-700">
+                              {formatJournalLine(line)}
+                            </div>
+                          ))}
+                        </div>
+                        {entry.transaction && (
+                          <div className="mt-3">
+                            <button
+                              onClick={() => openTransactionDrilldown(entry.transaction!.id)}
+                              className="text-xs font-semibold text-green-700 hover:text-green-800"
+                            >
+                              Open source transaction
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {settingsSection === 'team' && (
           <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
             <div className="mb-4 flex items-start justify-between gap-3">
               <div>
@@ -4298,7 +6877,9 @@ export default function App() {
               </div>
             )}
           </div>
+          )}
 
+          {settingsSection === 'advanced' && (
           <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
             <div className="mb-4 flex items-start justify-between gap-3">
               <div>
@@ -4371,36 +6952,9 @@ export default function App() {
               You can use both channels for one business. Each channel has its own chat thread, but all confirmed records go to the same workspace books.
             </div>
           </div>
+          )}
 
-          <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Currency preference</h2>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div>
-                <label className="mb-2 block text-sm font-medium text-gray-700">Default currency</label>
-                <select
-                  value={settingsCurrencyCode}
-                  onChange={(event) => setSettingsCurrencyCode(event.target.value as typeof supportedCurrencies[number])}
-                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
-                >
-                  {supportedCurrencies.map((code) => (
-                    <option key={code} value={code}>{code}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="rounded-2xl bg-gray-50 px-4 py-3">
-                <p className="text-xs uppercase tracking-wide text-gray-500">Preview</p>
-                <p className="mt-2 text-xl font-semibold text-gray-900">{formatCurrencyValue(4500, settingsCurrencyCode)}</p>
-              </div>
-            </div>
-            <button
-              onClick={handleSaveCurrency}
-              disabled={isAnySettingsActionPending}
-              className="mt-4 inline-flex items-center justify-center rounded-2xl bg-green-500 px-5 py-3 text-sm font-semibold text-white hover:bg-green-600 disabled:opacity-50"
-            >
-              {isSavingCurrency ? 'Saving...' : 'Save Currency'}
-            </button>
-          </div>
-
+          {settingsSection === 'advanced' && (
           <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
             <div className="mb-4 flex items-start justify-between gap-4">
               <div>
@@ -4471,66 +7025,7 @@ export default function App() {
               {referralCopyMessage && <p className="mt-2 text-xs text-green-700">{referralCopyMessage}</p>}
             </div>
           </div>
-
-          <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Monthly Budget Target</h2>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Budget type</label>
-                <select
-                  value={budgetTargetType}
-                  onChange={(e) => setBudgetTargetType(e.target.value as BudgetTargetType)}
-                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
-                >
-                  <option value="expense">Expense budget</option>
-                  <option value="revenue">Revenue target</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Amount ({activeCurrencyCode})</label>
-                <input
-                  type="number"
-                  min="0"
-                  value={budgetAmount}
-                  onChange={(e) => setBudgetAmount(e.target.value)}
-                  className="w-full rounded-2xl border-gray-200 bg-white px-4 py-3 text-sm"
-                />
-              </div>
-            </div>
-            {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
-            <button
-              onClick={handleSaveBudget}
-              disabled={isAnySettingsActionPending || !budgetAmount}
-              className="mt-4 inline-flex items-center justify-center rounded-2xl bg-green-500 px-5 py-3 text-sm font-semibold text-white hover:bg-green-600 disabled:opacity-50"
-            >
-              {isSavingBudget ? 'Saving...' : 'Save Budget'}
-            </button>
-          </div>
-
-          <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Current monthly budgets</h2>
-            {budgets.length === 0 ? (
-              <p className="text-sm text-gray-500">No budget targets set yet for this month.</p>
-            ) : (
-              <div className="space-y-3">
-                {budgets.map((budget) => (
-                  <div key={budget.id} className="rounded-2xl border border-gray-200 bg-gray-50 p-4">
-                    <p className="text-sm text-gray-500 capitalize">{budget.targetType} budget</p>
-                    <p className="text-xl font-semibold text-gray-900">{formatCurrency(budget.amount)}</p>
-                    {budget.category && <p className="text-sm text-gray-500">Category: {budget.category}</p>}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm">
-            <h2 className="text-lg font-semibold text-gray-900 mb-3">How budgets work</h2>
-            <div className="space-y-3 text-sm text-gray-600">
-              <p>Set a monthly expense budget or revenue target and Akonta AI will watch your numbers.</p>
-              <p>When you log entries, the chat bot will tell you if you are near or over budget.</p>
-            </div>
-          </div>
+          )}
 
         </div>
 

@@ -9,6 +9,7 @@ import {
   qualifyReferralFromSubscription,
   REFERRAL_MILESTONE_SIZE
 } from '../services/referrals.js';
+import { bootstrapBusinessDefaults } from '../services/setupDefaults.js';
 
 const subscriptionStatuses = ['free', 'basic', 'premium', 'trial'] as const;
 const subscriptionSources = ['trial', 'paid', 'referral_bonus', 'admin_adjustment'] as const;
@@ -82,6 +83,7 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
       subscriptionStatus?: 'free' | 'basic' | 'premium' | 'trial';
       currencyCode?: string;
       referralCode?: string;
+      paymentMethods?: string[];
     };
 
     if (!body.name || !body.phoneNumber) {
@@ -144,11 +146,22 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
         const createdBusiness = await tx.business.create({
           data: {
             businessName: body.businessName ?? `${body.name}'s Business`,
+            businessType: body.businessType ?? null,
+            currencyCode: normalizedCurrency ?? 'GHS',
+            enabledPaymentMethods: Array.isArray(body.paymentMethods) ? body.paymentMethods : Prisma.JsonNull,
+            onboardingVersion: 2,
+            onboardingCompletedAt: new Date(),
             ownerUserId: created.id,
             primaryWhatsappUserId: created.id,
             timezone: body.timezone ?? 'Africa/Accra',
             subscriptionStatus: desiredSubscriptionStatus
           }
+        });
+
+        await bootstrapBusinessDefaults(tx, {
+          businessId: createdBusiness.id,
+          businessType: body.businessType ?? null,
+          includeLedger: config.DEFAULT_LEDGER_V1_ENABLED
         });
 
         await tx.businessMembership.create({

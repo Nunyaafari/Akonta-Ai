@@ -2,6 +2,10 @@ import type { MembershipRole } from '@prisma/client';
 
 export type Permission =
   | 'workspace:view'
+  | 'settings:view'
+  | 'settings:manage'
+  | 'masterdata:manage'
+  | 'ledger:view'
   | 'workspace:members:manage'
   | 'transaction:view'
   | 'transaction:create'
@@ -20,6 +24,10 @@ export type Permission =
 const permissionMap: Record<MembershipRole, Set<Permission>> = {
   owner: new Set<Permission>([
     'workspace:view',
+    'settings:view',
+    'settings:manage',
+    'masterdata:manage',
+    'ledger:view',
     'workspace:members:manage',
     'transaction:view',
     'transaction:create',
@@ -37,6 +45,10 @@ const permissionMap: Record<MembershipRole, Set<Permission>> = {
   ]),
   manager: new Set<Permission>([
     'workspace:view',
+    'settings:view',
+    'settings:manage',
+    'masterdata:manage',
+    'ledger:view',
     'transaction:view',
     'transaction:create',
     'transaction:edit_same_day',
@@ -51,6 +63,10 @@ const permissionMap: Record<MembershipRole, Set<Permission>> = {
   ]),
   bookkeeper: new Set<Permission>([
     'workspace:view',
+    'settings:view',
+    'settings:manage',
+    'masterdata:manage',
+    'ledger:view',
     'transaction:view',
     'transaction:create',
     'transaction:edit_same_day',
@@ -66,6 +82,7 @@ const permissionMap: Record<MembershipRole, Set<Permission>> = {
   ]),
   cashier: new Set<Permission>([
     'workspace:view',
+    'settings:view',
     'transaction:view',
     'transaction:create',
     'transaction:edit_same_day',
@@ -76,6 +93,7 @@ const permissionMap: Record<MembershipRole, Set<Permission>> = {
   ]),
   viewer: new Set<Permission>([
     'workspace:view',
+    'settings:view',
     'transaction:view',
     'summary:view',
     'budget:view',
@@ -83,6 +101,10 @@ const permissionMap: Record<MembershipRole, Set<Permission>> = {
   ]),
   accountant: new Set<Permission>([
     'workspace:view',
+    'settings:view',
+    'settings:manage',
+    'masterdata:manage',
+    'ledger:view',
     'transaction:view',
     'transaction:create',
     'transaction:edit_same_day',

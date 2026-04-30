@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import db from '../lib/db.js';
 import { requirePermission } from '../lib/auth.js';
 import { writeAuditLog } from '../services/audit.js';
+import { syncTransactionLedgerState } from '../services/ledgerPosting.js';
 
 const transactionTypes = ['revenue', 'expense'] as const;
 const transactionEventTypes = [
@@ -95,23 +96,28 @@ const plugin: FastifyPluginAsync = async (fastify) => {
     }
 
     const status = body.status ?? 'confirmed';
-    const transaction = await db.transaction.create({
-      data: {
-        businessId: auth.businessId,
-        userId: auth.userId,
-        createdByUserId: auth.userId,
-        sourceChannel: body.sourceChannel ?? 'app',
-        type: body.type,
-        eventType: body.eventType ?? 'other',
-        status,
-        amount: body.amount,
-        date: parsedDate ?? new Date(),
-        category: body.category ?? null,
-        notes: body.notes ?? null,
-        correctionReason: body.correctionReason ?? null,
-        approvalStatus: 'not_required',
-        confirmedAt: status === 'confirmed' ? new Date() : null
-      }
+    const transaction = await db.$transaction(async (tx) => {
+      const created = await tx.transaction.create({
+        data: {
+          businessId: auth.businessId,
+          userId: auth.userId,
+          createdByUserId: auth.userId,
+          sourceChannel: body.sourceChannel ?? 'app',
+          type: body.type,
+          eventType: body.eventType ?? 'other',
+          status,
+          amount: body.amount,
+          date: parsedDate ?? new Date(),
+          category: body.category ?? null,
+          notes: body.notes ?? null,
+          correctionReason: body.correctionReason ?? null,
+          approvalStatus: 'not_required',
+          confirmedAt: status === 'confirmed' ? new Date() : null
+        }
+      });
+
+      await syncTransactionLedgerState(tx, { transactionId: created.id });
+      return created;
     });
 
     await writeAuditLog({
@@ -206,6 +212,7 @@ const plugin: FastifyPluginAsync = async (fastify) => {
       date?: string;
       category?: string | null;
       notes?: string | null;
+      requiresReview?: boolean;
       correctionReason?: string | null;
       approvalReason?: string;
     };
@@ -241,6 +248,7 @@ const plugin: FastifyPluginAsync = async (fastify) => {
       ...(parsedDate ? { date: parsedDate.toISOString() } : {}),
       ...(body.category !== undefined ? { category: body.category } : {}),
       ...(body.notes !== undefined ? { notes: body.notes } : {}),
+      ...(body.requiresReview !== undefined ? { requiresReview: body.requiresReview } : {}),
       ...(body.correctionReason !== undefined ? { correctionReason: body.correctionReason } : {})
     };
 
@@ -284,20 +292,26 @@ const plugin: FastifyPluginAsync = async (fastify) => {
     }
 
     const nextStatus = body.status ?? existing.status;
-    const updated = await db.transaction.update({
-      where: { id },
-      data: {
-        type: body.type ?? existing.type,
-        eventType: body.eventType ?? existing.eventType,
-        status: nextStatus,
-        amount: body.amount ?? existing.amount,
-        date: parsedDate ?? existing.date,
-        category: body.category === undefined ? existing.category : body.category,
-        notes: body.notes === undefined ? existing.notes : body.notes,
-        correctionReason: body.correctionReason === undefined ? existing.correctionReason : body.correctionReason,
-        confirmedAt: nextStatus === 'confirmed' ? existing.confirmedAt ?? new Date() : null,
-        approvalStatus: 'not_required'
-      }
+    const updated = await db.$transaction(async (tx) => {
+      const next = await tx.transaction.update({
+        where: { id },
+        data: {
+          type: body.type ?? existing.type,
+          eventType: body.eventType ?? existing.eventType,
+          status: nextStatus,
+          amount: body.amount ?? existing.amount,
+          date: parsedDate ?? existing.date,
+          category: body.category === undefined ? existing.category : body.category,
+          notes: body.notes === undefined ? existing.notes : body.notes,
+          requiresReview: body.requiresReview === undefined ? existing.requiresReview : body.requiresReview,
+          correctionReason: body.correctionReason === undefined ? existing.correctionReason : body.correctionReason,
+          confirmedAt: nextStatus === 'confirmed' ? existing.confirmedAt ?? new Date() : null,
+          approvalStatus: 'not_required'
+        }
+      });
+
+      await syncTransactionLedgerState(tx, { transactionId: next.id });
+      return next;
     });
 
     await writeAuditLog({
@@ -359,12 +373,17 @@ const plugin: FastifyPluginAsync = async (fastify) => {
       });
     }
 
-    const deleted = await db.transaction.update({
-      where: { id: existing.id },
-      data: {
-        isDeleted: true,
-        approvalStatus: 'not_required'
-      }
+    const deleted = await db.$transaction(async (tx) => {
+      const next = await tx.transaction.update({
+        where: { id: existing.id },
+        data: {
+          isDeleted: true,
+          approvalStatus: 'not_required'
+        }
+      });
+
+      await syncTransactionLedgerState(tx, { transactionId: next.id });
+      return next;
     });
 
     await writeAuditLog({
@@ -395,13 +414,18 @@ const plugin: FastifyPluginAsync = async (fastify) => {
       return existing;
     }
 
-    const confirmed = await db.transaction.update({
-      where: { id },
-      data: {
-        status: 'confirmed',
-        confirmedAt: new Date(),
-        approvalStatus: 'not_required'
-      }
+    const confirmed = await db.$transaction(async (tx) => {
+      const next = await tx.transaction.update({
+        where: { id },
+        data: {
+          status: 'confirmed',
+          confirmedAt: new Date(),
+          approvalStatus: 'not_required'
+        }
+      });
+
+      await syncTransactionLedgerState(tx, { transactionId: next.id });
+      return next;
     });
 
     return confirmed;
@@ -433,24 +457,29 @@ const plugin: FastifyPluginAsync = async (fastify) => {
       return reply.status(400).send({ message: 'Invalid date value.' });
     }
 
-    const correction = await db.transaction.create({
-      data: {
-        businessId: auth.businessId,
-        userId: original.userId,
-        createdByUserId: auth.userId,
-        sourceChannel: 'app',
-        type: body.type ?? original.type,
-        eventType: body.eventType ?? original.eventType,
-        status: body.status ?? 'confirmed',
-        amount: body.amount ?? original.amount,
-        date: parsedDate ?? original.date,
-        category: body.category === undefined ? original.category : body.category,
-        notes: body.notes === undefined ? original.notes : body.notes,
-        correctionReason: body.correctionReason ?? 'Correction entry',
-        correctionOfId: original.id,
-        approvalStatus: 'not_required',
-        confirmedAt: body.status === 'draft' ? null : new Date()
-      }
+    const correction = await db.$transaction(async (tx) => {
+      const created = await tx.transaction.create({
+        data: {
+          businessId: auth.businessId,
+          userId: original.userId,
+          createdByUserId: auth.userId,
+          sourceChannel: 'app',
+          type: body.type ?? original.type,
+          eventType: body.eventType ?? original.eventType,
+          status: body.status ?? 'confirmed',
+          amount: body.amount ?? original.amount,
+          date: parsedDate ?? original.date,
+          category: body.category === undefined ? original.category : body.category,
+          notes: body.notes === undefined ? original.notes : body.notes,
+          correctionReason: body.correctionReason ?? 'Correction entry',
+          correctionOfId: original.id,
+          approvalStatus: 'not_required',
+          confirmedAt: body.status === 'draft' ? null : new Date()
+        }
+      });
+
+      await syncTransactionLedgerState(tx, { transactionId: created.id });
+      return created;
     });
 
     await writeAuditLog({
@@ -523,39 +552,57 @@ const plugin: FastifyPluginAsync = async (fastify) => {
       const patch = parsePatchFromReason(approval.reason);
       if (patch) {
         const patchDate = typeof patch.date === 'string' ? parseOptionalDate(patch.date) : null;
-        updatedTransaction = await db.transaction.update({
-          where: { id: approval.transactionId },
-          data: {
-            type: (patch.type as TransactionTypeInput) ?? approval.transaction.type,
-            eventType: (patch.eventType as TransactionEventTypeInput) ?? approval.transaction.eventType,
-            status: (patch.status as TransactionStatusInput) ?? approval.transaction.status,
-            amount: typeof patch.amount === 'number' ? patch.amount : approval.transaction.amount,
-            date: patchDate ?? approval.transaction.date,
-            category: patch.category !== undefined ? (patch.category as string | null) : approval.transaction.category,
-            notes: patch.notes !== undefined ? (patch.notes as string | null) : approval.transaction.notes,
-            correctionReason: patch.correctionReason !== undefined
-              ? (patch.correctionReason as string | null)
-              : approval.transaction.correctionReason,
-            approvalStatus: 'approved',
-            approvedByUserId: auth.userId
-          }
+        updatedTransaction = await db.$transaction(async (tx) => {
+          const next = await tx.transaction.update({
+            where: { id: approval.transactionId },
+            data: {
+              type: (patch.type as TransactionTypeInput) ?? approval.transaction.type,
+              eventType: (patch.eventType as TransactionEventTypeInput) ?? approval.transaction.eventType,
+              status: (patch.status as TransactionStatusInput) ?? approval.transaction.status,
+              amount: typeof patch.amount === 'number' ? patch.amount : approval.transaction.amount,
+              date: patchDate ?? approval.transaction.date,
+              category: patch.category !== undefined ? (patch.category as string | null) : approval.transaction.category,
+              notes: patch.notes !== undefined ? (patch.notes as string | null) : approval.transaction.notes,
+              requiresReview: patch.requiresReview !== undefined
+                ? Boolean(patch.requiresReview)
+                : approval.transaction.requiresReview,
+              correctionReason: patch.correctionReason !== undefined
+                ? (patch.correctionReason as string | null)
+                : approval.transaction.correctionReason,
+              approvalStatus: 'approved',
+              approvedByUserId: auth.userId
+            }
+          });
+
+          await syncTransactionLedgerState(tx, { transactionId: next.id });
+          return next;
         });
       } else if (approval.reason?.startsWith('DELETE_REQUEST:')) {
-        updatedTransaction = await db.transaction.update({
-          where: { id: approval.transactionId },
-          data: {
-            isDeleted: true,
-            approvalStatus: 'approved',
-            approvedByUserId: auth.userId
-          }
+        updatedTransaction = await db.$transaction(async (tx) => {
+          const next = await tx.transaction.update({
+            where: { id: approval.transactionId },
+            data: {
+              isDeleted: true,
+              approvalStatus: 'approved',
+              approvedByUserId: auth.userId
+            }
+          });
+
+          await syncTransactionLedgerState(tx, { transactionId: next.id });
+          return next;
         });
       } else {
-        updatedTransaction = await db.transaction.update({
-          where: { id: approval.transactionId },
-          data: {
-            approvalStatus: 'approved',
-            approvedByUserId: auth.userId
-          }
+        updatedTransaction = await db.$transaction(async (tx) => {
+          const next = await tx.transaction.update({
+            where: { id: approval.transactionId },
+            data: {
+              approvalStatus: 'approved',
+              approvedByUserId: auth.userId
+            }
+          });
+
+          await syncTransactionLedgerState(tx, { transactionId: next.id });
+          return next;
         });
       }
     } else {

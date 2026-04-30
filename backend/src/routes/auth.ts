@@ -91,10 +91,14 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
     ]);
 
     if (phoneWindowCount >= config.OTP_MAX_REQUESTS_PER_PHONE_WINDOW) {
+      const retryAfterSeconds = Math.max(1, config.OTP_REQUEST_WINDOW_MINUTES * 60);
+      reply.header('Retry-After', String(retryAfterSeconds));
       return reply.status(429).send({ message: 'Too many OTP requests for this phone. Please wait and try again.' });
     }
 
     if (ipWindowCount >= config.OTP_MAX_REQUESTS_PER_IP_WINDOW) {
+      const retryAfterSeconds = Math.max(1, config.OTP_REQUEST_WINDOW_MINUTES * 60);
+      reply.header('Retry-After', String(retryAfterSeconds));
       return reply.status(429).send({ message: 'Too many OTP requests from this network. Please wait and try again.' });
     }
 

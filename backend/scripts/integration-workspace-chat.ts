@@ -30,9 +30,29 @@ const request = async <T>(params: {
   return { status: response.status, json };
 };
 
+const sleep = async (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const randomPhone = (seed: number): string => {
   const value = (seed % 10_000_000).toString().padStart(7, '0');
   return `23324${value}`;
+};
+
+const requestOtpWithRetry = async (phoneNumber: string, attempts = 3) => {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const otp = await request<RequestOtpResponse & { message?: string }>({
+      method: 'POST',
+      path: '/api/auth/request-otp',
+      body: { phoneNumber }
+    });
+    if (otp.status === 200) return otp;
+    if (otp.status !== 429 || attempt === attempts) return otp;
+    const message = typeof otp.json.message === 'string' ? otp.json.message : '';
+    const waitSecondsMatch = message.match(/wait\s+(\d+)s/i);
+    const waitSeconds = waitSecondsMatch ? Number(waitSecondsMatch[1]) : 5;
+    await sleep((Number.isFinite(waitSeconds) ? waitSeconds : 5) * 1000);
+  }
+
+  throw new Error(`request-otp failed for ${phoneNumber}`);
 };
 
 interface BootstrapOwnerResponse {
@@ -97,11 +117,7 @@ const main = async () => {
 
   assert.equal(bootstrap.status, 201, 'bootstrap-owner should return 201');
 
-  const ownerOtp = await request<RequestOtpResponse>({
-    method: 'POST',
-    path: '/api/auth/request-otp',
-    body: { phoneNumber: ownerPhone }
-  });
+  const ownerOtp = await requestOtpWithRetry(ownerPhone);
   assert.equal(ownerOtp.status, 200, 'owner request-otp should return 200');
   assert.ok(ownerOtp.json.devOtpCode, 'devOtpCode must be present in non-production mode');
 
@@ -144,11 +160,7 @@ const main = async () => {
   assert.equal(invite.status, 201, 'invite member should return 201');
   assert.equal(invite.json.role, 'cashier', 'invited role should be cashier');
 
-  const memberOtp = await request<RequestOtpResponse>({
-    method: 'POST',
-    path: '/api/auth/request-otp',
-    body: { phoneNumber: memberPhone }
-  });
+  const memberOtp = await requestOtpWithRetry(memberPhone);
 
   assert.equal(memberOtp.status, 200, 'member request-otp should return 200');
   assert.ok(memberOtp.json.devOtpCode, 'member devOtpCode should exist');
@@ -238,11 +250,58 @@ const main = async () => {
     'profit summary question should not reset current draft step'
   );
 
+  const resetDraft = await request<ChatResponse>({
+    method: 'POST',
+    path: '/api/chat',
+    token: ownerToken,
+    body: {
+      message: '99',
+      channel: 'web'
+    }
+  });
+  assert.equal(resetDraft.status, 200, 'cancel draft should return 200');
+  assert.equal(resetDraft.json.conversation.step, 'idle', 'cancel should reset session to idle');
+
+  const chat4 = await request<ChatResponse>({
+    method: 'POST',
+    path: '/api/chat',
+    token: ownerToken,
+    body: {
+      message: 'paid 1000',
+      channel: 'web'
+    }
+  });
+  assert.equal(chat4.status, 200, 'ambiguous paid message should return 200');
+  assert.match(
+    chat4.json.botReply,
+    /What was the payment for\?/i,
+    'ambiguous paid message should trigger follow-up question'
+  );
+
+  const chat5 = await request<ChatResponse>({
+    method: 'POST',
+    path: '/api/chat',
+    token: ownerToken,
+    body: {
+      message: '3 braids at 50 cash',
+      channel: 'web'
+    }
+  });
+  assert.equal(chat5.status, 200, 'calculated message should return 200');
+  assert.equal(chat5.json.conversation.step, 'await_confirm', 'calculated message should require confirmation step');
+  assert.match(
+    chat5.json.botReply,
+    /I calculated/i,
+    'calculated message should explain inferred total before save'
+  );
+
   console.log('\nIntegration checks passed:');
   console.log('- Owner bootstrap + OTP login');
   console.log('- Workspace invite + member OTP activation');
   console.log('- Expense-first chat regression fixed');
   console.log('- Profit summary workflow (last week/month)');
+  console.log('- Ambiguous intent follow-up prompts');
+  console.log('- Calculated entries require explicit confirmation');
 };
 
 main().catch((error) => {

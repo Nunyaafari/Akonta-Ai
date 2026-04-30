@@ -12,11 +12,12 @@ This guide operationalizes the cutover safety sequence:
 ## Prerequisites
 
 1. `DATABASE_URL` points to the source staging database.
-2. PostgreSQL client tools are installed locally:
+2. For local CLI mode, PostgreSQL client tools are installed:
    - `psql`
    - `pg_dump`
    - `pg_restore`
 3. Backend dependencies installed (`npm ci` in `backend/`).
+4. For Docker-native mode, `docker compose` is running with the `db` service.
 
 ## Run
 
@@ -33,6 +34,18 @@ ARTIFACT_ROOT="/tmp/akonta-rehearsal-$(date -u +%Y%m%dT%H%M%SZ)" \
 DATABASE_URL="postgresql://postgres:password@127.0.0.1:5432/ledgermate_staging" \
 npm run rehearsal:staging-migration
 ```
+
+Docker-native mode (no local `psql/pg_dump/pg_restore` required):
+
+```bash
+cd backend
+DATABASE_URL="postgresql://postgres:change_me@127.0.0.1:5433/ledgermate" \
+npm run rehearsal:staging-migration:docker
+```
+
+Optional Docker overrides:
+- `DOCKER_DB_CONTAINER` to target a specific Postgres container.
+- `DOCKER_PG_HOST` and `DOCKER_PG_PORT` (defaults: `127.0.0.1:5432` inside container).
 
 ## What The Script Checks
 

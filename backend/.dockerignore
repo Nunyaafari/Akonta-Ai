@@ -1,5 +1,23 @@
+# Dependencies & build output (rebuilt inside container)
 node_modules
 dist
+coverage
+
+# Scripts (integration tests, ops tooling — not needed at runtime)
+scripts/
+
+# Documentation
+*.md
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# OS / editor junk
 *.log
 .DS_Store
-.env
+.vscode
+.idea
+*.swp
+*.swo

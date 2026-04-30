@@ -1,13 +1,39 @@
+# Version control
 .git
 .gitignore
+.github
+
+# Backend (not needed for frontend image build)
+backend/
+
+# Dependencies & build output (rebuilt inside container)
 node_modules
-backend/node_modules
 dist
-backend/dist
 coverage
+
+# Docker configs (already in context via COPY, not needed recursively)
+docker-compose*.yml
+Dockerfile.frontend
+
+# Tests
+e2e/
+playwright.config.ts
+
+# Documentation & assets not needed in image
+*.md
+logo/
+ledger pricing.png
+INFRA_HARDENING_EVIDENCE_2026-04-26.md
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# OS / editor junk
 *.log
 .DS_Store
-.env
-.env.production
-backend/.env
-docker/certs
+.vscode
+.idea
+*.swp
+*.swo
